@@ -1,0 +1,5 @@
+// tf2cc alias (tools/gen_material_aliases.py)
+"Patch"
+{
+	include "materials/models/player/mercenary/mercenary_red.vmt"
+}

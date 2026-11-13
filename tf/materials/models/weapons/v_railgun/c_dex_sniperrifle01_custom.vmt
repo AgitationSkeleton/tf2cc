@@ -1,0 +1,5 @@
+// tf2cc alias (tools/gen_material_aliases.py)
+"Patch"
+{
+	include "materials/models/weapons/c_items/c_dex_sniperrifle01.vmt"
+}

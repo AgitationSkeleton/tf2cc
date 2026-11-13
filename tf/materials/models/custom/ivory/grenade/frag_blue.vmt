@@ -1,0 +1,18 @@
+"VertexLitGeneric"
+{
+	"$basetexture" "models\custom\ivory\grenade\frag_blue"
+
+	"$bumpmap" "models\effects\flat_normal"	
+
+	"$phong" "1"
+	"$phongexponent" "20"
+	"$phongboost" ".3"	
+	"$lightwarptexture" "models/player/pyro/pyro_lightwarp"
+	"$phongfresnelranges"	"[.3 1 8]"
+	"$halflambert" "0"
+
+	"$rimlight" "1"
+	"$rimlightexponent" "4"
+	"$rimlightboost" "2"
+	"$cloakPassEnabled" "1"
+}
