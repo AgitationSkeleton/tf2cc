@@ -460,18 +460,21 @@ int LookupSequenceOnModel(const char[] model, const char[] sequence)
 	int tmp = CreateEntityByName("prop_dynamic_override");
 	if (tmp == -1)
 		return -1;
+	// A fresh prop with DefaultAnim: SetAnimation after forcing m_nSequence to -1
+	// left the sequence at 65535 (verified on the test server).
 	DispatchKeyValue(tmp, "model", model);
 	DispatchKeyValue(tmp, "solid", "0");
+	DispatchKeyValue(tmp, "DefaultAnim", sequence);
 	if (!DispatchSpawn(tmp))
 	{
 		RemoveEntity(tmp);
 		return -1;
 	}
-	SetEntProp(tmp, Prop_Send, "m_nSequence", -1);
-	SetVariantString(sequence);
-	AcceptEntityInput(tmp, "SetAnimation");
+	ActivateEntity(tmp);
 	seq = GetEntProp(tmp, Prop_Send, "m_nSequence");
 	RemoveEntity(tmp);
+	if (seq >= 65535)
+		seq = -1;
 	cache.SetValue(key, seq);
 	return seq;
 }

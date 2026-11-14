@@ -55,6 +55,9 @@ ConVar g_cvPf2Delay, g_cvPf2Heal, g_cvPf2Damage, g_cvPf2Range, g_cvPf2InfectTime
 #define BOMBLET_MODEL "models/weapons/customclasses/w_models/w_grenade_bomblet.mdl"
 #define DYNAMITE_MODEL "models/weapons/customclasses/w_models/w_dynamite.mdl"
 #define NAIL_MODEL "models/weapons/w_models/w_nail.mdl"
+#define DRG_BALL_MODEL "models/weapons/w_models/w_drg_ball.mdl"
+bool g_bModelDrgBall;
+char g_sBombLog[PLATFORM_MAX_PATH];
 bool g_bModelNail;
 bool g_bModelDynamite;
 #define BOMBLET_DYNAMITE 1
@@ -191,6 +194,8 @@ public void OnMapStart()
 	g_bModelBomblet = PrecacheModel(BOMBLET_MODEL, true) != 0;
 	g_bModelDynamite = PrecacheModel(DYNAMITE_MODEL, true) != 0;
 	g_bModelNail = PrecacheModel(NAIL_MODEL, true) != 0;
+	g_bModelDrgBall = PrecacheModel(DRG_BALL_MODEL, true) != 0;
+	BuildPath(Path_SM, g_sBombLog, sizeof(g_sBombLog), "logs/tf2cc_bomblets.log");
 	ParticleIndex("drg_cow_explosioncore_normal");
 	ParticleIndex("drg_cow_explosioncore_normal_blue");
 	ParticleIndex("drg_cow_rockettrail_normal");
@@ -787,6 +792,15 @@ public void Frame_CheckBombParent(int ref)
 	// The thrown bundle looks like dynamite (OF ProjectileModel w_dynamite).
 	if (kind == BOMBLET_DYNAMITE && g_bModelDynamite)
 		SetEntityModel(entity, DYNAMITE_MODEL);
+	// OF GIB fires an energy ball (ProjectileType projectile_coom): Cow Mangler
+	// ball model + its team-coloured trail as the stock stand-in.
+	if (kind == BOMBLET_GIB && StrEqual(cls, "tf_projectile_rocket"))
+	{
+		if (g_bModelDrgBall)
+			SetEntityModel(entity, DRG_BALL_MODEL);
+		AttachTrail(entity, GetEntProp(entity, Prop_Send, "m_iTeamNum") == 3 ? "drg_cow_rockettrail_normal_blue" : "drg_cow_rockettrail_normal");
+	}
+	LogToFileEx(g_sBombLog, "parent %d %s kind %d launcher %d", entity, cls, kind, launcher);
 	g_iBombExplodeTick[entity] = 0;
 }
 
@@ -820,6 +834,7 @@ public Action TE_TFExplosion(const char[] te_name, const int[] players, int numC
 		g_iBombExplodeTick[entity] = GetGameTickCount();
 		for (int i = 0; i < 3; i++)
 			g_vecBombNormal[entity][i] = normal[i];
+		LogToFileEx(g_sBombLog, "explosion matched parent %d kind %d", entity, g_iBombParent[entity]);
 		break;
 	}
 	return Plugin_Continue;
@@ -843,6 +858,7 @@ public void Frame_SpawnBomblets(DataPack dp)
 		count = g_cvBombCount[kind].IntValue;
 	if (count > BOMBLET_MAX)
 		count = BOMBLET_MAX;
+	LogToFileEx(g_sBombLog, "spawn bomblets kind %d count %d owner %d", kind, count, owner);
 	if (count <= 0 || owner < 1 || !IsClientInGame(owner))
 		return;
 	if (NormalizeVector(normal, normal) < 0.5)
@@ -1281,18 +1297,21 @@ int LookupSequenceOnModel(const char[] model, const char[] sequence)
 	int tmp = CreateEntityByName("prop_dynamic_override");
 	if (tmp == -1)
 		return -1;
+	// A fresh prop with DefaultAnim: SetAnimation after forcing m_nSequence to -1
+	// left the sequence at 65535 (verified on the test server).
 	DispatchKeyValue(tmp, "model", model);
 	DispatchKeyValue(tmp, "solid", "0");
+	DispatchKeyValue(tmp, "DefaultAnim", sequence);
 	if (!DispatchSpawn(tmp))
 	{
 		RemoveEntity(tmp);
 		return -1;
 	}
-	SetEntProp(tmp, Prop_Send, "m_nSequence", -1);
-	SetVariantString(sequence);
-	AcceptEntityInput(tmp, "SetAnimation");
+	ActivateEntity(tmp);
 	seq = GetEntProp(tmp, Prop_Send, "m_nSequence");
 	RemoveEntity(tmp);
+	if (seq >= 65535)
+		seq = -1;
 	cache.SetValue(key, seq);
 	return seq;
 }

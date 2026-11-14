@@ -91,6 +91,8 @@ ConVar g_cvDownloads;
 ConVar g_cvBotChance;
 ConVar g_cvMvmUpgrades;
 ConVar g_cvMvmDefenders;
+ConVar g_cvHudModelGuard;
+bool g_bHudPlayermodel[MAXPLAYERS + 1];
 ConVar g_cvBossPrefixes;
 ConVar g_cvBossTeam;
 ConVar g_cvVipEnabled;
@@ -164,6 +166,8 @@ public void OnPluginStart()
 	g_cvBaseSpeed = CreateConVar("tf2cc_class10_base_speed", "250", "Stock class-10 max speed (retail scripts/playerclasses/civilian.ctx).");
 	g_cvSafeClass = CreateConVar("tf2cc_safe_desired_class", "1", "Stock class (1-9) networked as the desired class for role players who never played a stock class. Keeps the loadout panel off class 10.", _, true, 1.0, true, 9.0);
 	g_cvSanitizeAll = CreateConVar("tf2cc_sanitize_all_class10", "1", "Also hide class 10 in the player resource for non-role players (e.g. other plugins).", _, true, 0.0, true, 1.0);
+	g_cvHudModelGuard = CreateConVar("tf2cc_hud_playermodel_guard", "1", "Refuse roles to players with cl_hud_show_playermodel 1 (the retail client crashes drawing it for class 10).", _, true, 0.0, true, 1.0);
+	CreateTimer(5.0, Timer_QueryHudModel, _, TIMER_REPEAT);
 	g_cvMvmDefenders = CreateConVar("tf2cc_mvm_allow_defenders", "0", "Mann vs. Machine: allow roles on the RED defender team (the BLU invader/robot team is never eligible).", _, true, 0.0, true, 1.0);
 	g_cvVipEnabled = CreateConVar("tf2cc_vip_guard", "1", "Hunted/VIP/escort maps: deny tf2cc_vip_roles on the VIP team so the map's own Civilian/VIP stays unique.", _, true, 0.0, true, 1.0);
 	g_cvVipPrefixes = CreateConVar("tf2cc_vip_map_prefixes", "vip_,hunted_,escort_", "Map prefixes treated as hunted/VIP/escort maps.");
@@ -316,6 +320,8 @@ void AddManifestDownloads()
 
 public void OnClientPutInServer(int client)
 {
+	g_bHudPlayermodel[client] = false;
+	QueryHudModel(client);
 	ResetClient(client);
 	SDKHook(client, SDKHook_OnTakeDamage, Hook_FallDamage);
 	// Bots created by "tf_bot_add ... <class>" (or a plugin issuing it) keep that class.
@@ -563,10 +569,55 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 	g_iRole[client] = want;
 
 	int serial = ++g_iSpawnSerial[client];
-	DataPack pack = new DataPack();
-	pack.WriteCell(GetClientUserId(client));
-	pack.WriteCell(serial);
-	RequestFrame(Frame_FinishRoleSpawn, pack);
+	ScheduleFinishRoleSpawn(client, serial);
+}
+
+/*
+ * Round restarts respawn everyone in one frame, and some map scripts
+ * (ctf_2fort_mvm_v4: SetPlayerClass 1..9 + Regenerate per player) create and
+ * free several hundred entities in that frame. The engine does not reuse a
+ * freed edict immediately, so role setup (presentation, loadout grant) for
+ * many role players in the same window pushed the server past 2048 edicts
+ * (FATAL ERROR: ED_Alloc: no free edicts). The first few finish next frame as
+ * before; the rest of a burst are spread out after the window.
+ */
+float g_flBurstStart;
+int g_iBurstCount;
+
+int BurstSlot()
+{
+	float now = GetEngineTime();
+	if (now - g_flBurstStart > 1.0)
+	{
+		g_flBurstStart = now;
+		g_iBurstCount = 0;
+	}
+	return ++g_iBurstCount;
+}
+
+void ScheduleFinishRoleSpawn(int client, int serial)
+{
+	int slot = BurstSlot();
+	if (slot <= 3)
+	{
+		DataPack pack = new DataPack();
+		pack.WriteCell(GetClientUserId(client));
+		pack.WriteCell(serial);
+		RequestFrame(Frame_FinishRoleSpawn, pack);
+		return;
+	}
+	DataPack dp;
+	CreateDataTimer(0.6 + 0.06 * float(slot - 3), Timer_FinishRoleSpawn, dp, TIMER_FLAG_NO_MAPCHANGE);
+	dp.WriteCell(GetClientUserId(client));
+	dp.WriteCell(serial);
+}
+
+public Action Timer_FinishRoleSpawn(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int userid = dp.ReadCell();
+	FinishRoleSpawn(GetClientOfUserId(userid), dp.ReadCell());
+	return Plugin_Stop;
 }
 
 public void Frame_FinishRoleSpawn(DataPack pack)
@@ -575,7 +626,11 @@ public void Frame_FinishRoleSpawn(DataPack pack)
 	int client = GetClientOfUserId(pack.ReadCell());
 	int serial = pack.ReadCell();
 	delete pack;
+	FinishRoleSpawn(client, serial);
+}
 
+void FinishRoleSpawn(int client, int serial)
+{
 	if (!client || !IsPlayerAlive(client) || serial != g_iSpawnSerial[client])
 		return;
 	if (TF2_GetPlayerClass(client) != view_as<TFClassType>(TF2CC_CLASS_INDEX))
@@ -640,10 +695,7 @@ void FallbackConvert(int client)
 
 	int serial = ++g_iSpawnSerial[client];
 	g_iRole[client] = g_iPending[client];
-	DataPack pack = new DataPack();
-	pack.WriteCell(GetClientUserId(client));
-	pack.WriteCell(serial);
-	RequestFrame(Frame_FinishRoleSpawn, pack);
+	ScheduleFinishRoleSpawn(client, serial);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1090,8 +1142,37 @@ bool IsBossModeClient(int client)
 }
 
 /** Select a role (or TF2CC_ROLE_NONE for stock). Returns false if refused. */
+/**
+ * The retail client crashes drawing its HUD player model (cl_hud_show_playermodel 1)
+ * for class 10 (no class entry for it). Servers cannot set that client cvar, so
+ * players who have it on are kept off roles. Re-queried every few seconds.
+ */
+void QueryHudModel(int client)
+{
+	if (IsClientInGame(client) && !IsFakeClient(client))
+		QueryClientConVar(client, "cl_hud_show_playermodel", OnHudModelQueried);
+}
+
+public void OnHudModelQueried(QueryCookie cookie, int client, ConVarQueryResult result, const char[] name, const char[] value)
+{
+	g_bHudPlayermodel[client] = result == ConVarQuery_Okay && StringToInt(value) != 0;
+}
+
+public Action Timer_QueryHudModel(Handle timer)
+{
+	if (g_cvHudModelGuard.BoolValue)
+		for (int i = 1; i <= MaxClients; i++)
+			QueryHudModel(i);
+	return Plugin_Continue;
+}
+
 bool SelectRole(int client, int role, bool respawnNow, bool fromRandom = false)
 {
+	if (role != TF2CC_ROLE_NONE && g_cvHudModelGuard.BoolValue && g_bHudPlayermodel[client])
+	{
+		PrintToChat(client, "\x04[TF2CC]\x01 Set cl_hud_show_playermodel 0 first: the game client crashes drawing that HUD model for these classes.");
+		return false;
+	}
 	if (role != TF2CC_ROLE_NONE)
 	{
 		char reason[128];

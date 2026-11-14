@@ -30,6 +30,13 @@ but its weapon and model assets are used.
 | Weapon Modellers | Mr. Big, Overpovered, DrPyspy |
 | Particles | FissionMetroid101 |
 
+## Additional voice work
+
+| Lines | Credit |
+|---|---|
+| Soldier and Engineer "the Mercenary is a Spy" callouts | Mr. Big |
+| Scout "the Mercenary / Civilian is a Spy" callouts; Mercenary revenge and domination lines | Evermatt |
+
 ## Where each asset comes from
 
 | Content (under `tf/`) | Origin |

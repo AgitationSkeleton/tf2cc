@@ -483,9 +483,16 @@ void SpyCallout(int client)
 		}
 		else
 		{
+			// Stock: an enemy shows as his disguise; a cloaked enemy only counts
+			// (as a Spy) while exposed; teammates by real class.
 			int cls = view_as<int>(TF2_GetPlayerClass(target));
-			if (TF2_GetPlayerClass(target) == TFClass_Spy && TF2_IsPlayerInCondition(target, TFCond_Disguised))
-				cls = GetEntProp(target, Prop_Send, "m_nDisguiseClass");
+			if (GetClientTeam(target) != GetClientTeam(client))
+			{
+				if (TF2_IsPlayerInCondition(target, TFCond_Cloaked))
+					cls = TF2_IsPlayerInCondition(target, TFCond_CloakFlicker) ? view_as<int>(TFClass_Spy) : 0;   // exposed (bumped/shot) only
+				else if (TF2_IsPlayerInCondition(target, TFCond_Disguised))
+					cls = GetEntProp(target, Prop_Send, "m_nDisguiseClass");
+			}
 			if (cls >= 1 && cls <= 9)
 			{
 				FormatEx(concept, sizeof(concept), "_spy_%s", names[cls]);
@@ -501,7 +508,7 @@ void SpyCallout(int client)
 }
 
 /**
- * Enemy under the crosshair, or failing an exact hit (cosmetics, robot
+ * Player under the crosshair (any team, like stock), or failing an exact hit (cosmetics, robot
  * models and attachments often catch the trace) the visible enemy whose
  * head, chest or feet is closest to the crosshair within ~18 degrees.
  */
@@ -509,8 +516,10 @@ int SpyTarget(int client)
 {
 	if (g_iForcedSpyTarget > 0)
 		return g_iForcedSpyTarget;
+	// Stock CTFPlayer::ModifyOrAppendCriteria sets "crosshair_on" for ANY player
+	// under the crosshair (teammates by their real class), not only enemies.
 	int target = GetClientAimTarget(client, true);
-	if (target > 0 && GetClientTeam(target) != GetClientTeam(client))
+	if (target > 0 && IsPlayerAlive(target))
 		return target;
 	float eye[3], ang[3], fwd[3], origin[3], pos[3], dir[3];
 	GetClientEyePosition(client, eye);
@@ -521,7 +530,7 @@ int SpyTarget(int client)
 	static const float heights[3] = { 64.0, 40.0, 12.0 };
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (i == client || !IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) == GetClientTeam(client))
+		if (i == client || !IsClientInGame(i) || !IsPlayerAlive(i) || GetClientTeam(i) < 2)
 			continue;
 		GetClientAbsOrigin(i, origin);
 		for (int h = 0; h < 3; h++)

@@ -34,6 +34,7 @@ Config file: `cfg/sourcemod/tf2cc_core.cfg`
 | `tf2cc_class10_base_speed` | `250` |  | Stock class-10 max speed (retail scripts/playerclasses/civilian.ctx). |
 | `tf2cc_safe_desired_class` | `1` | 1 .. 9 | Stock class (1-9) networked as the desired class for role players who never played a stock class. Keeps the loadout panel off class 10. |
 | `tf2cc_sanitize_all_class10` | `1` | 0 .. 1 | Also hide class 10 in the player resource for non-role players (e.g. other plugins). |
+| `tf2cc_hud_playermodel_guard` | `1` | 0 .. 1 | Refuse roles to players with cl_hud_show_playermodel 1 (the retail client crashes drawing it for class 10). |
 | `tf2cc_mvm_allow_defenders` | `0` | 0 .. 1 | Mann vs. Machine: allow roles on the RED defender team (the BLU invader/robot team is never eligible). |
 | `tf2cc_vip_guard` | `1` | 0 .. 1 | Hunted/VIP/escort maps: deny tf2cc_vip_roles on the VIP team so the map's own Civilian/VIP stays unique. |
 | `tf2cc_vip_map_prefixes` | `vip_,hunted_,escort_` |  | Map prefixes treated as hunted/VIP/escort maps. |
@@ -134,10 +135,12 @@ Config file: `cfg/sourcemod/tf2cc_taunts.cfg`
 |---|---|---|---|
 | `tf2cc_taunts_enabled` | `1` | 0 .. 1 | Enable experimental sequence taunts for roles. |
 | `tf2cc_taunts_prop_class` | `prop_dynamic_override` |  | Clone entity: prop_dynamic_override (stable) or tf_taunt_prop (EXPERIMENTAL: crashed srcds in testing). |
-| `tf2cc_taunts_mode` | `player` |  | player = the player model plays the taunt (eyes, lip-sync); clone = a prop copy plays it while the player is hidden (old behaviour). |
+| `tf2cc_taunts_debug` | `0` | 0 .. 1 | 1 = log which weapon id and taunt each taunt picked. |
+| `tf2cc_taunts_mode` | `clone` |  | clone = a prop copy plays the taunt while the player is hidden (default); player = the player model plays it (EXPERIMENTAL: eyes and lip-sync, but T-posed on a test client). |
 
 | Command | Access | What it does |
 |---|---|---|
+| `sm_tf2cc_tauntstate` | admin: generic | Show taunt state of role players. |
 | `sm_tf2cc_taunt` | admin: cheats | sm_tf2cc_taunt <target> [sequence] - make a role player taunt (their normal pick, or a named sequence). |
 
 ## TF2CC Voice (`tf2cc_voice.smx`)
@@ -183,6 +186,7 @@ Config file: `cfg/sourcemod/tf2cc_weapons.cfg`
 | `sm_tf2cc_give` | admin: cheats | sm_tf2cc_give <weapon id> [target] - give a configured tf2cc weapon (yourself by default). |
 | `sm_tf2cc_weapons` | admin: generic | List configured tf2cc weapons and their validation status. |
 | `sm_tf2cc_inv` | admin: generic | Dump role players' inventory records and live weapon state. |
+| `sm_tf2cc_entleak` | admin: generic | Count tf_weapon_*/tf_wearable* entities by owner state (held / owned-not-held / orphan) to find leaks. |
 | `sm_tf2cc_vmstate` | admin: generic | sm_tf2cc_vmstate <target> - viewmodel, active weapon flags and owned wearables (logs/tf2cc_vmtrace.log). |
 | `sm_tf2cc_vmtrace` | admin: generic | sm_tf2cc_vmtrace <target> [seconds] - log viewmodel sequence/parity/model every 0.1 s to logs/tf2cc_vmtrace.log. |
 

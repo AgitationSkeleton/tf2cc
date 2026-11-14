@@ -174,6 +174,9 @@ ConVar g_cvBotSwapChance;
 KeyValues g_kvVariants;   // configs/tf2cc/model_variants.cfg
 ConVar g_cvModelVariants;
 ConVar g_cvOwnerSounds;
+char g_sPackLog[PLATFORM_MAX_PATH];
+float g_flRematBurstStart;   // round-restart burst staggering (Event_Inventory)
+int g_iRematBurst;
 bool g_bEchoing;
 bool g_bUseHeld[MAXPLAYERS + 1];
 int g_iWorldWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };  // per-entity cooldown in case a pack ignores Disable
@@ -190,8 +193,11 @@ bool g_bTF2Attributes;
 char g_sPickupSound[PLATFORM_MAX_PATH] = "items/gunpickup2.wav";
 char g_sAmmoSound[PLATFORM_MAX_PATH] = "items/ammo_pickup.wav";
 
+bool g_bLateLoad;
+
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
+	g_bLateLoad = late;
 	CreateNative("TF2CC_GetWeaponSpecial", Native_GetWeaponSpecial);
 	CreateNative("TF2CC_ClientHasSpecial", Native_ClientHasSpecial);
 	CreateNative("TF2CC_GetWeaponId", Native_GetWeaponId);
@@ -266,11 +272,13 @@ public void OnPluginStart()
 	RegAdminCmd("sm_tf2cc_give", Cmd_Give, ADMFLAG_CHEATS, "sm_tf2cc_give <weapon id> [target] - give a configured tf2cc weapon (yourself by default).");
 	RegAdminCmd("sm_tf2cc_weapons", Cmd_ListWeapons, ADMFLAG_GENERIC, "List configured tf2cc weapons and their validation status.");
 	RegAdminCmd("sm_tf2cc_inv", Cmd_Inventory, ADMFLAG_GENERIC, "Dump role players' inventory records and live weapon state.");
+	RegAdminCmd("sm_tf2cc_entleak", Cmd_EntLeak, ADMFLAG_GENERIC, "Count tf_weapon_*/tf_wearable* entities by owner state (held / owned-not-held / orphan) to find leaks.");
 	RegAdminCmd("sm_tf2cc_vmstate", Cmd_VMState, ADMFLAG_GENERIC, "sm_tf2cc_vmstate <target> - viewmodel, active weapon flags and owned wearables (logs/tf2cc_vmtrace.log).");
 	RegAdminCmd("sm_tf2cc_vmtrace", Cmd_VMTrace, ADMFLAG_GENERIC, "sm_tf2cc_vmtrace <target> [seconds] - log viewmodel sequence/parity/model every 0.1 s to logs/tf2cc_vmtrace.log.");
 	AddCommandListener(Listener_DropItem, "dropitem");
 
 	HookEvent("post_inventory_application", Event_Inventory);
+	BuildPath(Path_SM, g_sPackLog, sizeof(g_sPackLog), "logs/tf2cc_packs.log");
 	CreateTimer(0.2, Timer_PickupScan, _, TIMER_REPEAT);
 	HookEvent("player_death", Event_PlayerDeath);
 
@@ -280,14 +288,42 @@ public void OnPluginStart()
 	LoadWeapons();
 	AddNormalSoundHook(Hook_Sound);
 
-	for (int client = 1; client <= MaxClients; client++)
-		if (IsClientInGame(client))
-			OnClientPutInServer(client);
+	if (g_bLateLoad)
+		LateLoad();
+	else
+		for (int client = 1; client <= MaxClients; client++)
+			if (IsClientInGame(client))
+				OnClientPutInServer(client);
 }
 
 public void OnAllPluginsLoaded() { g_bTF2Attributes = LibraryExists("tf2attributes"); }
 public void OnLibraryAdded(const char[] name) { if (StrEqual(name, "tf2attributes")) g_bTF2Attributes = true; }
 public void OnLibraryRemoved(const char[] name) { if (StrEqual(name, "tf2attributes")) g_bTF2Attributes = false; }
+
+void LateLoad()
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client))
+			continue;
+		OnClientPutInServer(client);
+		if (IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+		{
+			AdoptInventory(client);
+			UpdateOverlay(client);
+		}
+	}
+	// Map packs/kits only hook in OnEntityCreated, which already ran for them.
+	char cls[64];
+	for (int e = MaxClients + 1; e < GetMaxEntities(); e++)
+	{
+		if (!IsValidEntity(e))
+			continue;
+		GetEntityClassname(e, cls, sizeof(cls));
+		if (StrContains(cls, "item_ammopack_") == 0 || StrEqual(cls, "tf_ammo_pack") || StrContains(cls, "item_healthkit_") == 0)
+			OnEntityCreated(e, cls);
+	}
+}
 
 public void OnPluginEnd()
 {
@@ -412,9 +448,14 @@ void ApplyModelVariant(int client)
 			FormatEx(id, sizeof(id), "stock:%d", g_Inv[client][slot].itemdef);
 	}
 	g_kvVariants.GetString(id, model, sizeof(model));
-	if (!model[0])
-		g_kvVariants.GetString("default", model, sizeof(model));
 	g_kvVariants.Rewind();
+	if (!model[0] && slot >= 0 && g_Inv[client][slot].weapon < 0)
+		StockVariant(client, active, slot, model, sizeof(model));
+	if (!model[0] && g_kvVariants.JumpToKey(roleKey))
+	{
+		g_kvVariants.GetString("default", model, sizeof(model));
+		g_kvVariants.Rewind();
+	}
 	if (!model[0] || !IsModelPrecached(model))
 		return;
 	GetEntPropString(client, Prop_Send, "m_iszCustomModel", cur, sizeof(cur));
@@ -448,6 +489,53 @@ public void OnClientPutInServer(int client)
 	g_flNextPickupHint[client] = 0.0;
 	SDKHook(client, SDKHook_WeaponSwitchPost, Hook_WeaponSwitchPost);
 	SDKHook(client, SDKHook_WeaponEquipPost, Hook_WeaponEquipPost);
+	SDKHook(client, SDKHook_PostThinkPost, Hook_HideDonor);
+}
+
+/**
+ * Every tick: a role player's active donor stays hidden while its custom world
+ * model rides a wearable. Deploy (SetWeaponVisible) clears EF_NODRAW on each
+ * switch; re-hiding only every 0.2 s let quick switches show the stock model.
+ */
+public void Hook_HideDonor(int client)
+{
+	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsPlayerAlive(client) || EntRefToEntIndex(g_iWorldWearable[client]) <= MaxClients)
+		return;
+	int act = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (act <= MaxClients || !GetEntProp(act, Prop_Send, "m_bBeingRepurposedForTaunt"))
+		return;
+	int fx = GetEntProp(act, Prop_Send, "m_fEffects");
+	if (!(fx & EF_NODRAW))
+		SetEntProp(act, Prop_Send, "m_fEffects", fx | EF_NODRAW);
+}
+
+/** Late load (plugin reload mid-map): take over what role players already hold. */
+void AdoptInventory(int client)
+{
+	for (int s = 0; s <= SLOT_MELEE; s++)
+	{
+		int ent = GetPlayerWeaponSlot(client, s);
+		if (ent <= MaxClients)
+			continue;
+		char cls[64];
+		GetEntityClassname(ent, cls, sizeof(cls));
+		int itemdef = GetEntProp(ent, Prop_Send, "m_iItemDefinitionIndex");
+		int idx = WEAPON_NONE;
+		WeaponDef w;
+		for (int i = 0; i < g_Weapons.Length; i++)
+		{
+			g_Weapons.GetArray(i, w);
+			if (w.itemdef == itemdef && StrEqual(w.classname, cls) && w.slot == s)
+			{
+				idx = i;
+				break;
+			}
+		}
+		int maxReserve = idx >= 0 && w.reserve > 0 ? w.reserve : DefaultReserve(ent, idx >= 0 ? w.family : 0);
+		StoreSlot(client, s, idx >= 0 ? idx : STOCK_ITEM, itemdef, ent, maxReserve);
+		int type = GetEntProp(ent, Prop_Send, "m_iPrimaryAmmoType");
+		g_Inv[client][s].reserve = type > 0 ? GetEntProp(client, Prop_Send, "m_iAmmo", _, type) : 0;
+	}
 }
 
 /**
@@ -1391,7 +1479,7 @@ bool OtherSlotSharesType(int client, int slot, int type)
 
 public void Hook_WeaponSwitchPost(int client, int weapon)
 {
-	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE)
+	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsRoleClass(client))
 		return;
 
 	// Save the reserve of the weapon we left, load the reserve of the new one
@@ -1440,9 +1528,38 @@ public void Event_Inventory(Event event, const char[] name, bool dontBroadcast)
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (!TF2CC_IsValidClient(client) || TF2CC_GetRole(client) == TF2CC_ROLE_NONE || g_bGranting[client])
 		return;
+	// Role players are class 10. Map scripts that cycle SetPlayerClass(1..9) +
+	// Regenerate on round start (ctf_2fort_mvm_v4, trade_minecraft) fire this
+	// event once per temporary class in a single frame; rebuilding the loadout
+	// each time created ~40 entities per role player per round, all freed only
+	// at frame end, and with ~10 role bots the burst passed the 2048-edict limit
+	// (FATAL ERROR: ED_Alloc: no free edicts). Only the final class-10 pass counts.
+	if (!IsRoleClass(client))
+		return;
 	// Same tick: post_inventory_application fires right after ValidateWeapons,
-	// so the class-10 default hands (c_medic_arms) are never drawn.
+	// so the class-10 default hands (c_medic_arms) are never drawn - except in a
+	// round-restart burst (see tf2cc_core ScheduleFinishRoleSpawn), where the
+	// rebuilds are spread out so freed edicts can be reused in between.
+	float now = GetEngineTime();
+	if (now - g_flRematBurstStart > 1.0)
+	{
+		g_flRematBurstStart = now;
+		g_iRematBurst = 0;
+	}
+	if (++g_iRematBurst > 3)
+	{
+		CreateTimer(0.6 + 0.06 * float(g_iRematBurst - 3), Timer_Rematerialize, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+		return;
+	}
 	Frame_Rematerialize(GetClientUserId(client));
+}
+
+public Action Timer_Rematerialize(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client && IsRoleClass(client))
+		Frame_Rematerialize(userid);
+	return Plugin_Stop;
 }
 
 public void Frame_Rematerialize(int userid)
@@ -1526,6 +1643,10 @@ void UpdateOverlay(int client)
 		RemoveOverlay(client);
 		return;
 	}
+	// A map script is cycling the player through stock classes (see
+	// Event_Inventory): no overlay/world-model churn until class 10 is back.
+	if (!IsRoleClass(client))
+		return;
 	char mode[16], arms[PLATFORM_MAX_PATH];
 	TF2CC_GetRoleString(role, "arms_mode", mode, sizeof(mode));
 	if (!TF2CC_GetRoleString(role, "arms_model", arms, sizeof(arms)) || !FileExists(arms, true))
@@ -1765,9 +1886,15 @@ public Action Hook_AmmoTouch(int pack, int other)
 
 	// MarxVee OnAmmoPickup: only MAP packs (never a dropped tf_ammo_pack) may
 	// drop a weapon, which appears on the floor at the pack to be picked up.
-	if (StrContains(classname, "item_ammopack_") == 0 && RolePackWeapons(other)
-		&& GetURandomFloat() < g_cvPackWeapons.FloatValue && SpawnPackWeapon(other, pack))
+	bool mapPack = StrContains(classname, "item_ammopack_") == 0, roleOk = RolePackWeapons(other);
+	float roll = GetURandomFloat();
+	bool spawned = false;
+	if (mapPack && roleOk && roll < g_cvPackWeapons.FloatValue)
+		spawned = SpawnPackWeapon(other, pack);
+	if (spawned)
 		used = true;
+	LogToFileEx(g_sPackLog, "%N touched %s (#%d): ammo used=%d mappack=%d roleweapons=%d roll=%.2f/%.2f spawned=%d",
+		other, classname, pack, used, mapPack, roleOk, roll, g_cvPackWeapons.FloatValue, spawned);
 
 	// Hoarder's Stash: an unneeded ammo pack is carried for later.
 	if (!used && StashAdd(other, STASH_AMMO, WEAPON_NONE, -1, -1, -1, frac))
@@ -3345,4 +3472,200 @@ void EchoToOwner(int owner, const int[] clients, int numClients, const char[] sa
 	g_bEchoing = true;
 	EmitSoundToClient(owner, sample, entity, channel, level, flags, volume, pitch);
 	g_bEchoing = false;
+}
+
+public Action Cmd_EntLeak(int client, int args)
+{
+	int held = 0, notHeld = 0, orphan = 0, ourHeld = 0, wearOwned = 0, wearOrphan = 0, total = 0;
+	char cls[64];
+	int notHeldByRole = 0;
+	for (int e = MaxClients + 1; e < GetMaxEntities(); e++)
+	{
+		if (!IsValidEntity(e))
+			continue;
+		total++;
+		GetEntityClassname(e, cls, sizeof(cls));
+		bool weapon = StrContains(cls, "tf_weapon_") == 0;
+		bool wear = StrContains(cls, "tf_wearable") == 0;
+		if (!weapon && !wear)
+			continue;
+		int owner = HasEntProp(e, Prop_Send, "m_hOwnerEntity") ? GetEntPropEnt(e, Prop_Send, "m_hOwnerEntity") : -1;
+		if (wear)
+		{
+			if (owner >= 1 && owner <= MaxClients && IsClientInGame(owner)) wearOwned++; else wearOrphan++;
+			continue;
+		}
+		if (owner < 1 || owner > MaxClients || !IsClientInGame(owner))
+		{
+			orphan++;
+			continue;
+		}
+		bool inList = false;
+		int size = GetEntPropArraySize(owner, Prop_Send, "m_hMyWeapons");
+		for (int i = 0; i < size; i++)
+			if (GetEntPropEnt(owner, Prop_Send, "m_hMyWeapons", i) == e)
+				inList = true;
+		if (inList)
+		{
+			held++;
+			if (SlotOfEntity(owner, e) >= 0) ourHeld++;
+		}
+		else
+		{
+			notHeld++;
+			if (TF2CC_GetRole(owner) != TF2CC_ROLE_NONE) notHeldByRole++;
+		}
+	}
+	ReplyToCommand(client, "[TF2CC] entities %d | weapons held %d (tf2cc %d), owned-not-held %d (role owners %d), orphan %d | wearables owned %d, orphan %d",
+		total, held, ourHeld, notHeld, notHeldByRole, orphan, wearOwned, wearOrphan);
+	// Per role player: weapons in m_hMyWeapons and owned wearables.
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || TF2CC_GetRole(i) == TF2CC_ROLE_NONE)
+			continue;
+		int nw = 0, size = GetEntPropArraySize(i, Prop_Send, "m_hMyWeapons");
+		char list[256];
+		list[0] = '\0';
+		for (int k = 0; k < size; k++)
+		{
+			int w = GetEntPropEnt(i, Prop_Send, "m_hMyWeapons", k);
+			if (w <= MaxClients)
+				continue;
+			nw++;
+			GetEntityClassname(w, cls, sizeof(cls));
+			if (strlen(list) < 200)
+				Format(list, sizeof(list), "%s %s", list, cls[10]);
+		}
+		int nwear = 0;
+		for (int e = MaxClients + 1; e < GetMaxEntities(); e++)
+		{
+			if (!IsValidEntity(e)) continue;
+			GetEntityClassname(e, cls, sizeof(cls));
+			if (StrContains(cls, "tf_wearable") == 0 && GetEntPropEnt(e, Prop_Send, "m_hOwnerEntity") == i)
+				nwear++;
+		}
+		int act = GetEntPropEnt(i, Prop_Send, "m_hActiveWeapon");
+		char actId[48] = "-", model[PLATFORM_MAX_PATH], wmodel[PLATFORM_MAX_PATH] = "-";
+		int asl = act > MaxClients ? SlotOfEntity(i, act) : -1;
+		if (asl >= 0 && g_Inv[i][asl].weapon >= 0)
+		{
+			WeaponDef aw;
+			g_Weapons.GetArray(g_Inv[i][asl].weapon, aw);
+			strcopy(actId, sizeof(actId), aw.id);
+		}
+		else if (act > MaxClients)
+			GetEntityClassname(act, actId, sizeof(actId));
+		GetEntPropString(i, Prop_Send, "m_iszCustomModel", model, sizeof(model));
+		int wear = EntRefToEntIndex(g_iWorldWearable[i]);
+		if (wear > MaxClients)
+			ModelIndexToString(GetEntProp(wear, Prop_Send, "m_nModelIndex"), wmodel, sizeof(wmodel));
+		ReplyToCommand(client, "  %N: %d weapons [%s ], %d wearables | active %s | world %s | model %s", i, nw, list, nwear, actId, wmodel[0] ? wmodel : "-", model);
+	}
+	return Plugin_Handled;
+}
+
+/** Role players are class 10; anything else is a map script's temporary class. */
+bool IsRoleClass(int client)
+{
+	return view_as<int>(TF2_GetPlayerClass(client)) == 10;
+}
+
+/**
+ * Stock pickup: play the closest Merc weapon's OF animation set in the group
+ * the item really animates in (schema anim_slot, else its slot), on whichever
+ * variant maps that group to that set (model_variants.cfg "sets").
+ */
+void StockVariant(int client, int weapon, int slot, char[] model, int maxlen)
+{
+	char cls[64], analog[48], set[32], group[24];
+	GetEntityClassname(weapon, cls, sizeof(cls));
+	if (!AnalogWeapon(cls, analog, sizeof(analog)))
+		return;
+	g_kvVariants.Rewind();
+	if (!g_kvVariants.JumpToKey("weapon_sets"))
+		return;
+	g_kvVariants.GetString(analog, set, sizeof(set));
+	g_kvVariants.Rewind();
+	if (!set[0])
+		return;
+	SchemaItem it;
+	if (ResolveSchemaItem(g_Inv[client][slot].itemdef, it) && it.animSlot[0] && !StrEqual(it.animSlot, "-2"))
+		strcopy(group, sizeof(group), it.animSlot);
+	else
+		strcopy(group, sizeof(group), slot == SLOT_PRIMARY ? "PRIMARY" : (slot == SLOT_SECONDARY ? "SECONDARY" : "MELEE"));
+	StringToUpper(group);
+	if (!g_kvVariants.JumpToKey("sets") || !g_kvVariants.GotoFirstSubKey())
+	{
+		g_kvVariants.Rewind();
+		return;
+	}
+	char have[32];
+	do
+	{
+		g_kvVariants.GetString(group, have, sizeof(have));
+		if (StrEqual(have, set, false))
+		{
+			g_kvVariants.GetSectionName(model, maxlen);
+			break;
+		}
+	}
+	while (g_kvVariants.GotoNextKey());
+	g_kvVariants.Rewind();
+}
+
+/** Closest configured Merc weapon for a stock classname (same donor class first, then families). */
+bool AnalogWeapon(const char[] cls, char[] out, int maxlen)
+{
+	WeaponDef w;
+	for (int i = 0; i < g_Weapons.Length; i++)
+	{
+		g_Weapons.GetArray(i, w);
+		if (StrEqual(w.classname, cls) && StrContains(w.roles, "mercenary") != -1)
+		{
+			strcopy(out, maxlen, w.id);
+			return true;
+		}
+	}
+	static const char families[][][] = {
+		{ "tf_weapon_shotgun", "merc_shotgun" }, { "tf_weapon_sentry_revenge", "merc_shotgun" },
+		{ "tf_weapon_rocketlauncher", "merc_rocketlauncher" }, { "tf_weapon_particle_cannon", "merc_rocketlauncher" },
+		{ "tf_weapon_grenadelauncher", "merc_chinalake" }, { "tf_weapon_cannon", "merc_chinalake" },
+		{ "tf_weapon_pipebomblauncher", "merc_dynamite" },
+		{ "tf_weapon_handgun_scout_secondary", "merc_pistol" }, { "tf_weapon_pistol", "merc_pistol" },
+		{ "tf_weapon_handgun_scout_primary", "merc_assaultrifle" },
+		{ "tf_weapon_charged_smg", "merc_smg" }, { "tf_weapon_smg", "merc_smg" },
+		{ "tf_weapon_sniperrifle", "merc_railgun" }, { "tf_weapon_minigun", "merc_gatling" },
+		{ "tf_weapon_scattergun", "merc_supershotgun" }, { "tf_weapon_soda_popper", "merc_supershotgun" },
+		{ "tf_weapon_pep_brawler_blaster", "merc_supershotgun" },
+		{ "tf_weapon_revolver", "merc_revolver" }, { "tf_weapon_syringegun", "merc_nailgun" },
+		{ "tf_weapon_crossbow", "merc_sawballista" }, { "tf_weapon_knife", "merc_knife" },
+		{ "tf_weapon_fists", "merc_fists" }
+	};
+	for (int i = 0; i < sizeof(families); i++)
+	{
+		if (StrContains(cls, families[i][0]) == 0)
+		{
+			strcopy(out, maxlen, families[i][1]);
+			return true;
+		}
+	}
+	// Any other melee weapon swings like the crowbar.
+	static const char melee[][] = { "tf_weapon_bat", "tf_weapon_bottle", "tf_weapon_fireaxe", "tf_weapon_club", "tf_weapon_shovel",
+		"tf_weapon_wrench", "tf_weapon_bonesaw", "tf_weapon_sword", "tf_weapon_katana", "tf_weapon_robot_arm",
+		"tf_weapon_breakable_sign", "tf_weapon_stickbomb", "tf_weapon_slap", "tf_weapon_saxxy" };
+	for (int i = 0; i < sizeof(melee); i++)
+	{
+		if (StrContains(cls, melee[i]) == 0)
+		{
+			strcopy(out, maxlen, "merc_crowbar");
+			return true;
+		}
+	}
+	return false;
+}
+
+void StringToUpper(char[] s)
+{
+	for (int i = 0; s[i]; i++)
+		s[i] = CharToUpper(s[i]);
 }

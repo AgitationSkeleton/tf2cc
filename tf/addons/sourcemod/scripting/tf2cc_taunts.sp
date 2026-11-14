@@ -48,15 +48,19 @@ public Plugin myinfo =
 ConVar g_cvEnabled;
 ConVar g_cvPropClass;
 ConVar g_cvMode;
+ConVar g_cvDebug;
 // Entity playing the taunt: the clone, or the player itself in "player" mode.
 int g_iProp[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 bool g_bPlayerMode[MAXPLAYERS + 1];
+bool g_bTaunting[MAXPLAYERS + 1];   // explicit state: an entity reference to a client survives map changes
 bool g_bWeaponWasHidden[MAXPLAYERS + 1];
 int g_iTauntWeapon[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 #define PLAYERANIMEVENT_SPAWN 17            // multiplayer_animstate.h: ClearAnimationState()
 #define PLAYERANIMEVENT_CUSTOM_SEQUENCE 21  // m_nSpecificMainSequence = nData
 Handle g_hEndTimer[MAXPLAYERS + 1];
 float g_flNextTaunt[MAXPLAYERS + 1];
+float g_flTauntYaw[MAXPLAYERS + 1];
+ArrayList g_aHidden[MAXPLAYERS + 1];   // wearables this taunt hid (restore only those)
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -71,13 +75,25 @@ public void OnPluginStart()
 	g_cvEnabled = CreateConVar("tf2cc_taunts_enabled", "1", "Enable experimental sequence taunts for roles.", _, true, 0.0, true, 1.0);
 	// tf_taunt_prop crashed the server when driven without a scene (play-test 2026-11-10).
 	g_cvPropClass = CreateConVar("tf2cc_taunts_prop_class", "prop_dynamic_override", "Clone entity: prop_dynamic_override (stable) or tf_taunt_prop (EXPERIMENTAL: crashed srcds in testing).");
-	g_cvMode = CreateConVar("tf2cc_taunts_mode", "player", "player = the player model plays the taunt (eyes, lip-sync); clone = a prop copy plays it while the player is hidden (old behaviour).");
+	g_cvDebug = CreateConVar("tf2cc_taunts_debug", "0", "1 = log which weapon id and taunt each taunt picked.", _, true, 0.0, true, 1.0);
+	g_cvMode = CreateConVar("tf2cc_taunts_mode", "clone", "clone = a prop copy plays the taunt while the player is hidden (default); player = the player model plays it (EXPERIMENTAL: eyes and lip-sync, but T-posed on a test client).");
 	AutoExecConfig(true, "tf2cc_taunts");
 	LoadTranslations("common.phrases");
 	AddCommandListener(Listener_Taunt, "taunt");
 	AddCommandListener(Listener_Taunt, "+taunt");
 	HookEvent("player_death", Event_Death);
+	HookEvent("player_spawn", Event_Death);
+	// Weapon switching would re-show the donor or a custom world model mid-taunt.
+	static const char switchCmds[][] = { "use", "lastinv", "invnext", "invprev", "slot1", "slot2", "slot3", "slot4", "slot5", "slot6", "slot7", "slot8", "slot9", "slot10" };
+	for (int i = 0; i < sizeof(switchCmds); i++)
+		AddCommandListener(Listener_Switch, switchCmds[i]);
+	RegAdminCmd("sm_tf2cc_tauntstate", Cmd_TauntState, ADMFLAG_GENERIC, "Show taunt state of role players.");
 	RegAdminCmd("sm_tf2cc_taunt", Cmd_Taunt, ADMFLAG_CHEATS, "sm_tf2cc_taunt <target> [sequence] - make a role player taunt (their normal pick, or a named sequence).");
+}
+
+public Action Listener_Switch(int client, const char[] command, int argc)
+{
+	return client > 0 && client <= MaxClients && IsTaunting(client) ? Plugin_Handled : Plugin_Continue;
 }
 
 public Action Cmd_Taunt(int client, int args)
@@ -140,6 +156,8 @@ public Action Listener_Taunt(int client, const char[] command, int argc)
 	char spec[96];
 	if (WeaponTaunt(client, role, spec, sizeof(spec)))
 	{
+		if (g_cvDebug.BoolValue)
+			LogMessage("taunt %N: weapon pick '%s'", client, spec);
 		char p[5][64];
 		ExplodeString(spec, ":", p, sizeof(p), sizeof(p[]));
 		float dur = p[1][0] ? StringToFloat(p[1]) : 4.0;
@@ -222,7 +240,11 @@ void StartTaunt(int client, const char[] sequence, float duration, const char[] 
 		if (weapon > MaxClients)
 			SetEntityRenderMode(weapon, RENDER_NONE);
 	}
+	float eyes[3];
+	GetClientEyeAngles(client, eyes);
+	g_flTauntYaw[client] = eyes[1];
 	g_bPlayerMode[client] = playerMode;
+	g_bTaunting[client] = true;
 	SetWearablesHidden(client, true);   // custom world-model wearables ride the player
 	SetEntityMoveType(client, MOVETYPE_NONE);
 	// Networked and predicted: the client stops predicting shots too.
@@ -272,7 +294,18 @@ public Action Timer_End(Handle timer, int userid)
 
 bool IsTaunting(int client)
 {
-	return EntRefToEntIndex(g_iProp[client]) > 0;
+	return g_bTaunting[client] && EntRefToEntIndex(g_iProp[client]) > 0;
+}
+
+public void OnMapStart()
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_bTaunting[i] = false;
+		g_bPlayerMode[i] = false;
+		g_iProp[i] = INVALID_ENT_REFERENCE;
+		g_hEndTimer[i] = null;   // TIMER_FLAG_NO_MAPCHANGE timers are already gone
+	}
 }
 
 void EndTaunt(int client)
@@ -280,7 +313,9 @@ void EndTaunt(int client)
 	delete g_hEndTimer[client];
 	int prop = EntRefToEntIndex(g_iProp[client]);
 	g_iProp[client] = INVALID_ENT_REFERENCE;
-	if (prop <= 0)
+	bool was = g_bTaunting[client];
+	g_bTaunting[client] = false;
+	if (prop <= 0 || !was)
 		return;
 	if (g_bPlayerMode[client])
 	{
@@ -325,7 +360,8 @@ public Action Timer_BondShot(Handle timer, int userid)
 		return Plugin_Stop;
 	float eye[3], ang[3], dir[3], end[3];
 	GetClientEyePosition(client, eye);
-	GetClientEyeAngles(client, ang);
+	// Along the taunt's facing: in clone mode the view orbits freely.
+	ang[1] = g_flTauntYaw[client];
 	GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
 	ScaleVector(dir, 500.0);
 	AddVectors(eye, dir, end);
@@ -367,7 +403,9 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 {
 	if (!IsTaunting(client))
 		return Plugin_Continue;
-	buttons &= ~(IN_ATTACK | IN_ATTACK2 | IN_ATTACK3 | IN_RELOAD | IN_JUMP | IN_DUCK);
+	buttons &= ~(IN_ATTACK | IN_ATTACK2 | IN_ATTACK3 | IN_RELOAD | IN_JUMP | IN_DUCK
+		| IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+	vel[0] = vel[1] = vel[2] = 0.0;
 	weapon = 0;
 	return Plugin_Changed;
 }
@@ -378,18 +416,21 @@ int ResolveSequence(const char[] model, const char[] sequence)
 	int tmp = CreateEntityByName("prop_dynamic_override");
 	if (tmp == -1)
 		return -1;
+	// A fresh prop with DefaultAnim: SetAnimation after forcing m_nSequence to -1
+	// left the sequence at 65535 (verified on the test server).
 	DispatchKeyValue(tmp, "model", model);
 	DispatchKeyValue(tmp, "solid", "0");
+	DispatchKeyValue(tmp, "DefaultAnim", sequence);
 	if (!DispatchSpawn(tmp))
 	{
 		RemoveEntity(tmp);
 		return -1;
 	}
-	SetEntProp(tmp, Prop_Send, "m_nSequence", -1);
-	SetVariantString(sequence);
-	AcceptEntityInput(tmp, "SetAnimation");
+	ActivateEntity(tmp);
 	int seq = GetEntProp(tmp, Prop_Send, "m_nSequence");
 	RemoveEntity(tmp);
+	if (seq >= 65535)
+		seq = -1;
 	return seq;
 }
 
@@ -448,6 +489,8 @@ bool WeaponTaunt(int client, int role, char[] spec, int maxlen)
 	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
 	if (weapon > MaxClients && LibraryExists("tf2cc_weapons"))
 		TF2CC_GetWeaponId(weapon, id, sizeof(id));
+	if (g_cvDebug.BoolValue)
+		LogMessage("taunt %N: active %d id '%s'", client, weapon, id);
 	char entries[40][96];
 	int n = ExplodeString(map, ";", entries, sizeof(entries), sizeof(entries[]));
 	char fallback[96];
@@ -475,13 +518,32 @@ bool WeaponTaunt(int client, int role, char[] spec, int maxlen)
 /** Hide/show the player's third-person wearables (tf_wearable, not viewmodel ones) for the taunt. */
 void SetWearablesHidden(int client, bool hide)
 {
+	if (!hide)
+	{
+		if (g_aHidden[client] != null)
+		{
+			for (int i = 0; i < g_aHidden[client].Length; i++)
+			{
+				int w = EntRefToEntIndex(g_aHidden[client].Get(i));
+				if (w > MaxClients)
+					SetEntProp(w, Prop_Send, "m_fEffects", GetEntProp(w, Prop_Send, "m_fEffects") & ~EF_NODRAW);
+			}
+		}
+		delete g_aHidden[client];
+		return;
+	}
+	delete g_aHidden[client];
+	g_aHidden[client] = new ArrayList();
 	int e = -1;
 	while ((e = FindEntityByClassname(e, "tf_wearable")) != -1)
 	{
 		if (GetEntPropEnt(e, Prop_Send, "m_hOwnerEntity") != client)
 			continue;
 		int fx = GetEntProp(e, Prop_Send, "m_fEffects");
-		SetEntProp(e, Prop_Send, "m_fEffects", hide ? (fx | EF_NODRAW) : (fx & ~EF_NODRAW));
+		if (fx & EF_NODRAW)
+			continue;   // hidden by someone else (e.g. a holstered weapon's model): leave it
+		SetEntProp(e, Prop_Send, "m_fEffects", fx | EF_NODRAW);
+		g_aHidden[client].Push(EntIndexToEntRef(e));
 	}
 }
 
@@ -584,4 +646,16 @@ void SendAnimEvent(int client, int event, int data)
 int EntIndexToEHandle(int entity)
 {
 	return EntIndexToEntRef(entity) & ~(1 << 31);
+}
+
+public Action Cmd_TauntState(int client, int args)
+{
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!IsClientInGame(i) || TF2CC_GetRole(i) == TF2CC_ROLE_NONE)
+			continue;
+		ReplyToCommand(client, "%N: taunting=%d prop=%d player=%d timer=%d movetype=%d next=%.1f (now %.1f)", i, g_bTaunting[i],
+			EntRefToEntIndex(g_iProp[i]), g_bPlayerMode[i], g_hEndTimer[i] != null, view_as<int>(GetEntityMoveType(i)), g_flNextTaunt[i], GetGameTime());
+	}
+	return Plugin_Handled;
 }
