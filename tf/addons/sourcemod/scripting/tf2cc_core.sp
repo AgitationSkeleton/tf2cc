@@ -190,7 +190,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_civilian", Cmd_Civ, "Become the Civilian.");
 	RegAdminCmd("sm_tf2cc_reload", Cmd_Reload, ADMFLAG_CONFIG, "Reload roles.cfg.");
 	RegAdminCmd("sm_tf2cc_status", Cmd_Status, ADMFLAG_GENERIC, "Show role state of every player.");
-	RegAdminCmd("sm_tf2cc_setrole", Cmd_SetRoleAdmin, ADMFLAG_SLAY, "sm_tf2cc_setrole <target> <role|none>");
+	RegAdminCmd("sm_tf2cc_setrole", Cmd_SetRoleAdmin, ADMFLAG_SLAY, "sm_tf2cc_setrole <target> <role|none> - bots stay pinned to it until they leave.");
 
 	LoadTranslations("common.phrases");
 	AddCommandListener(Listener_JoinClass, "joinclass");
@@ -1648,6 +1648,9 @@ public Action Cmd_SetRoleAdmin(int client, int args)
 	}
 	for (int i = 0; i < n; i++)
 	{
+		// An admin choice pins a bot: RollBot would re-roll it on the next respawn.
+		if (IsFakeClient(targets[i]))
+			g_bFixedClassBot[targets[i]] = true;
 		if (role == TF2CC_ROLE_NONE)
 			JoinStockClass(targets[i], SafeClass(targets[i]));
 		else

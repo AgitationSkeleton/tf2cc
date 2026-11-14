@@ -58,7 +58,7 @@ Config file: `cfg/sourcemod/tf2cc_core.cfg`
 | `sm_civilian` | everyone | Become the Civilian. |
 | `sm_tf2cc_reload` | admin: config | Reload roles.cfg. |
 | `sm_tf2cc_status` | admin: generic | Show role state of every player. |
-| `sm_tf2cc_setrole` | admin: slay | sm_tf2cc_setrole <target> <role\|none> |
+| `sm_tf2cc_setrole` | admin: slay | sm_tf2cc_setrole <target> <role\|none> - bots stay pinned to it until they leave. |
 
 ## TF2CC HUD (`tf2cc_hud.smx`)
 
