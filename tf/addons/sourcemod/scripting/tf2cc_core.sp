@@ -166,7 +166,7 @@ public void OnPluginStart()
 	g_cvBaseSpeed = CreateConVar("tf2cc_class10_base_speed", "250", "Stock class-10 max speed (retail scripts/playerclasses/civilian.ctx).");
 	g_cvSafeClass = CreateConVar("tf2cc_safe_desired_class", "1", "Stock class (1-9) networked as the desired class for role players who never played a stock class. Keeps the loadout panel off class 10.", _, true, 1.0, true, 9.0);
 	g_cvSanitizeAll = CreateConVar("tf2cc_sanitize_all_class10", "1", "Also hide class 10 in the player resource for non-role players (e.g. other plugins).", _, true, 0.0, true, 1.0);
-	g_cvHudModelGuard = CreateConVar("tf2cc_hud_playermodel_guard", "1", "Refuse roles to players with cl_hud_show_playermodel 1 (the retail client crashes drawing it for class 10).", _, true, 0.0, true, 1.0);
+	g_cvHudModelGuard = CreateConVar("tf2cc_hud_playermodel_guard", "0", "1 = refuse roles to players with cl_hud_show_playermodel 1. The retail client crashed when it was toggled on mid-life as class 10; off by default.", _, true, 0.0, true, 1.0);
 	CreateTimer(5.0, Timer_QueryHudModel, _, TIMER_REPEAT);
 	g_cvMvmDefenders = CreateConVar("tf2cc_mvm_allow_defenders", "0", "Mann vs. Machine: allow roles on the RED defender team (the BLU invader/robot team is never eligible).", _, true, 0.0, true, 1.0);
 	g_cvVipEnabled = CreateConVar("tf2cc_vip_guard", "1", "Hunted/VIP/escort maps: deny tf2cc_vip_roles on the VIP team so the map's own Civilian/VIP stays unique.", _, true, 0.0, true, 1.0);
