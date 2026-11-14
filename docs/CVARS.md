@@ -134,7 +134,7 @@ Config file: `cfg/sourcemod/tf2cc_taunts.cfg`
 | Cvar | Default | Range | What it does |
 |---|---|---|---|
 | `tf2cc_taunts_enabled` | `1` | 0 .. 1 | Enable experimental sequence taunts for roles. |
-| `tf2cc_taunts_prop_class` | `prop_dynamic_override` |  | Clone entity: prop_dynamic_override (stable) or tf_taunt_prop (EXPERIMENTAL: crashed srcds in testing). |
+| `tf2cc_taunts_prop_class` | `funCBaseFlex` |  | Clone entity: funCBaseFlex (default: a flex entity, so the eyes look ahead; the plugin drives its animation) \| prop_dynamic_override (eyes roll up, may show the reference pose at the end) \| tf_taunt_prop (EXPERIMENTAL: crashed srcds in testing). |
 | `tf2cc_taunts_debug` | `0` | 0 .. 1 | 1 = log which weapon id and taunt each taunt picked. |
 | `tf2cc_taunts_mode` | `clone` |  | clone = a prop copy plays the taunt while the player is hidden (default); player = the player model plays it (EXPERIMENTAL: eyes and lip-sync, but T-posed on a test client). |
 

@@ -46,40 +46,40 @@ anim pistol__SECONDARY.mdl               323619 B  mapped 16 acts (1 by name pat
 anim rocketlauncher__PRIMARY.mdl         292704 B  mapped 22 acts (3 by name pattern: RELOAD_AIRWALK_ROCKETLAUNCHER->RELOAD_AIRWALK_PRIMARY, RELOAD_AIRWALK_ROCKETLAUNCHER_END->RELOAD_AIRWALK_PRIMARY_END, RELOAD_AIRWALK_ROCKETLAUNCHER_LOOP->RELOAD_AIRWALK_PRIMARY_LOOP) dropped(multi-target) []
 anim crowbar__ITEM1.mdl                  354662 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
 anim crowbar__MELEE_ALLCLASS.mdl         354968 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
-model merc_v01_rocketlauncher.mdl  1326445 bytes with companions  includes=10 (dropped primary2)
+model merc_v01_rocketlauncher.mdl  1326373 bytes with companions  includes=9 (dropped primary2, animations2)
 anim knife__MELEE.mdl                    254976 B  mapped 13 acts (0 by name pattern: ) dropped(multi-target) []
 anim shotgun__SECONDARY.mdl              396477 B  mapped 24 acts (3 by name pattern: RELOAD_AIRWALK_SHOTGUN->RELOAD_AIRWALK_SECONDARY, RELOAD_AIRWALK_SHOTGUN_END->RELOAD_AIRWALK_SECONDARY_END, RELOAD_AIRWALK_SHOTGUN_LOOP->RELOAD_AIRWALK_SECONDARY_LOOP) dropped(multi-target) []
 anim ssg__PRIMARY.mdl                    325701 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_SUPERSHOTGUN->RELOAD_AIRWALK_PRIMARY) dropped(multi-target) []
-model merc_v02_ssg.mdl  1326296 bytes with companions  includes=8 (dropped primary2)
+model merc_v02_ssg.mdl  1326224 bytes with companions  includes=7 (dropped primary2, animations2)
 anim berserk__MELEE.mdl                  256571 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
 anim akimbo__SECONDARY.mdl               381134 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_PISTOL_AKIMBO->RELOAD_AIRWALK_SECONDARY) dropped(multi-target) []
 anim gib__PRIMARY.mdl                    310750 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
-model merc_v03_gib.mdl  1326297 bytes with companions  includes=8 (dropped primary2)
+model merc_v03_gib.mdl  1326225 bytes with companions  includes=7 (dropped primary2, animations2)
 anim chainsaw__MELEE.mdl                 279578 B  mapped 12 acts (3 by name pattern: CHAINSAW_ATTACK_CROUCH_CHAINSAW->ATTACK_CROUCH_MELEE, CHAINSAW_ATTACK_STAND_CHAINSAW->ATTACK_STAND_MELEE, CHAINSAW_ATTACK_SWIM_CHAINSAW->ATTACK_SWIM_MELEE) dropped(multi-target) []
 anim revolver__SECONDARY.mdl             345491 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_REVOLVER_MERCENARY->RELOAD_AIRWALK_SECONDARY) dropped(multi-target) []
 anim nailgun__PRIMARY.mdl                304267 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_NAILGUN->RELOAD_AIRWALK_PRIMARY) dropped(multi-target) []
-model merc_v04_nailgun.mdl  1326304 bytes with companions  includes=8 (dropped primary2)
+model merc_v04_nailgun.mdl  1326232 bytes with companions  includes=7 (dropped primary2, animations2)
 anim combat_smg__SECONDARY.mdl           301198 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_SMG_MERCENARY->RELOAD_AIRWALK_SECONDARY) dropped(multi-target) []
 anim lightning_gun__PRIMARY.mdl          279811 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
-model merc_v05_lightning_gun.mdl  1326247 bytes with companions  includes=7 (dropped primary2)
+model merc_v05_lightning_gun.mdl  1326175 bytes with companions  includes=6 (dropped primary2, animations2)
 anim tommygun__SECONDARY.mdl             320499 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_TOMMYGUN_MERCENARY->RELOAD_AIRWALK_SECONDARY) dropped(multi-target) []
 anim chaingun__PRIMARY.mdl               255581 B  mapped 16 acts (4 by name pattern: RELOAD_AIRWALK_CHAINGUN->RELOAD_AIRWALK_PRIMARY, RELOAD_CROUCH_CHAINGUN->RELOAD_CROUCH_PRIMARY, RELOAD_STAND_CHAINGUN->RELOAD_STAND_PRIMARY, RELOAD_SWIM_CHAINGUN->RELOAD_SWIM_PRIMARY) dropped(multi-target) []
-model merc_v06_chaingun.mdl  1326240 bytes with companions  includes=7 (dropped primary2)
+model merc_v06_chaingun.mdl  1326168 bytes with companions  includes=6 (dropped primary2, animations2)
 anim chinalake__SECONDARY.mdl            466976 B  mapped 24 acts (3 by name pattern: RELOAD_AIRWALK_CHINA_LAKE->RELOAD_AIRWALK_SECONDARY, RELOAD_AIRWALK_CHINA_LAKE_END->RELOAD_AIRWALK_SECONDARY_END, RELOAD_AIRWALK_CHINA_LAKE_LOOP->RELOAD_AIRWALK_SECONDARY_LOOP) dropped(multi-target) []
 anim railgun__PRIMARY.mdl                415997 B  mapped 18 acts (1 by name pattern: CROUCHWALK_RAILGUN_DEPLOYED->CROUCHWALK_DEPLOYED) dropped(multi-target) []
-model merc_v07_railgun.mdl  1326240 bytes with companions  includes=7 (dropped primary2)
+model merc_v07_railgun.mdl  1326168 bytes with companions  includes=6 (dropped primary2, animations2)
 anim assault_rifle__SECONDARY.mdl        328085 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_ASSAULT_RIFLE->RELOAD_AIRWALK_SECONDARY) dropped(multi-target) []
 anim dynamite__PRIMARY.mdl               269533 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
-model merc_v08_dynamite.mdl  1326245 bytes with companions  includes=7 (dropped primary2)
+model merc_v08_dynamite.mdl  1326173 bytes with companions  includes=6 (dropped primary2, animations2)
 anim pistol__SECONDARY2.mdl              323662 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_PISTOL_MERCENARY->RELOAD_AIRWALK_SECONDARY2) dropped(multi-target) []
 anim dynamite__ITEM1.mdl                 269471 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
 anim ssg__ITEM2.mdl                      325615 B  mapped 16 acts (1 by name pattern: RELOAD_AIRWALK_SUPERSHOTGUN->RELOAD_AIRWALK_ITEM2) dropped(multi-target) []
 anim berserk__ITEM4.mdl                  256571 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
 anim crowbar__BUILDING.mdl               354764 B  mapped 12 acts (0 by name pattern: ) dropped(multi-target) []
 anim pistol__PDA.mdl                     323238 B  mapped 11 acts (0 by name pattern: ) dropped(multi-target) []
-model merc_default.mdl  1326755 bytes with companions  includes=15 (dropped primary2)
+model merc_default.mdl  1326683 bytes with companions  includes=14 (dropped primary2, animations2)
 
-SIZES: 8 variant models + default = 11937069 B (mesh+mdl+vvd+vtx+phy); 28 relabeled anim files = 9026561 B; total 20963630 B
+SIZES: 8 variant models + default = 11936421 B (mesh+mdl+vvd+vtx+phy); 28 relabeled anim files = 9026561 B; total 20962982 B
 
 VERIFICATION (virtual-model resolver; foreign probability = chance a stock soldier/legacy sequence is picked)
       legacy/soldier fallback by kind: core=2

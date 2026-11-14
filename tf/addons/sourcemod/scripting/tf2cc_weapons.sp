@@ -57,6 +57,7 @@ public Plugin myinfo =
 
 #define EF_BONEMERGE          0x001
 #define EF_NODRAW             0x020
+#define EF_NORECEIVESHADOW    0x040
 #define EF_BONEMERGE_FASTCULL 0x080
 
 #define TF_AMMO_PRIMARY   1
@@ -104,6 +105,7 @@ enum struct WeaponDef
 	int attrStart;            // index into g_Attrs
 	int attrCount;
 	ArrayList sounds;         // pairs: normalised find, replace
+	bool soundsLoop;          // replacements loop (cue points): stop them when firing stops
 }
 
 enum struct AttrDef
@@ -194,6 +196,35 @@ char g_sPickupSound[PLATFORM_MAX_PATH] = "items/gunpickup2.wav";
 char g_sAmmoSound[PLATFORM_MAX_PATH] = "items/ammo_pickup.wav";
 
 bool g_bLateLoad;
+char g_sLoopSnd[MAXPLAYERS + 1][PLATFORM_MAX_PATH];
+int g_iLoopEnt[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+int g_iLoopChan[MAXPLAYERS + 1];
+float g_flLoopAt[MAXPLAYERS + 1];
+
+/** Stop a "sounds_loop" replacement (e.g. the lightning gun zap). */
+void StopLoopSound(int client)
+{
+	if (!g_sLoopSnd[client][0])
+		return;
+	int ent = EntRefToEntIndex(g_iLoopEnt[client]);
+	if (ent > 0)
+		StopSound(ent, g_iLoopChan[client], g_sLoopSnd[client]);
+	g_sLoopSnd[client][0] = '\0';
+	g_iLoopEnt[client] = INVALID_ENT_REFERENCE;
+}
+float g_flForceDonorSync[MAXPLAYERS + 1];
+
+/** tf2cc_taunts after a taunt: rebuild the viewmodel overlay and world model. */
+public any Native_RefreshWeaponVisuals(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client)
+		|| TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsRoleClass(client))
+		return false;
+	UpdateOverlay(client);
+	g_flForceDonorSync[client] = GetGameTime() + 1.0;
+	return true;
+}
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -201,6 +232,7 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 	CreateNative("TF2CC_GetWeaponSpecial", Native_GetWeaponSpecial);
 	CreateNative("TF2CC_ClientHasSpecial", Native_ClientHasSpecial);
 	CreateNative("TF2CC_GetWeaponId", Native_GetWeaponId);
+	CreateNative("TF2CC_RefreshWeaponVisuals", Native_RefreshWeaponVisuals);
 	// forward void TF2CC_OnPerkChanged(int client, const char[] special, bool gained);
 	g_fwdPerk = new GlobalForward("TF2CC_OnPerkChanged", ET_Ignore, Param_Cell, Param_String, Param_Cell);
 	RegPluginLibrary("tf2cc_weapons");
@@ -506,7 +538,15 @@ public void Hook_HideDonor(int client)
 		return;
 	int fx = GetEntProp(act, Prop_Send, "m_fEffects");
 	if (!(fx & EF_NODRAW))
-		SetEntProp(act, Prop_Send, "m_fEffects", fx | EF_NODRAW);
+		fx |= EF_NODRAW;
+	// The owner's client predicts Deploy and clears EF_NODRAW locally; the
+	// server value never changes, so no update is sent and the owner keeps
+	// seeing the donor (thirdperson). Toggling an unused bit for a second after
+	// each switch forces m_fEffects (with EF_NODRAW) to be re-sent.
+	if (GetGameTime() < g_flForceDonorSync[client])
+		fx ^= EF_NORECEIVESHADOW;
+	if (fx != GetEntProp(act, Prop_Send, "m_fEffects"))
+		SetEntProp(act, Prop_Send, "m_fEffects", fx);
 }
 
 /** Late load (plugin reload mid-map): take over what role players already hold. */
@@ -724,6 +764,7 @@ void LoadWeapons()
 			}
 
 			w.sounds = null;
+			w.soundsLoop = kv.GetNum("sounds_loop", 0) != 0;
 			if (kv.JumpToKey("sounds"))
 			{
 				if (kv.GotoFirstSubKey())
@@ -1014,6 +1055,10 @@ void TranslateItemClass(const char[] itemClass, int cls, char[] out, int maxlen)
 /** Map a stock item_slot to the Mercenary's three combat slots. */
 int MercSlotForStockItem(SchemaItem it)
 {
+	// Merc's shotgun is a secondary: the Engineer-only shotguns (primary for
+	// him) are granted as the Soldier's secondary shotgun (GiveStockItem).
+	if (StrEqual(it.itemClass, "tf_weapon_shotgun_primary") || StrEqual(it.itemClass, "tf_weapon_shotgun"))
+		return SLOT_SECONDARY;
 	if (StrEqual(it.itemSlot, "primary"))   return SLOT_PRIMARY;
 	if (StrEqual(it.itemSlot, "secondary")) return SLOT_SECONDARY;
 	if (StrEqual(it.itemSlot, "melee"))     return SLOT_MELEE;
@@ -1301,6 +1346,11 @@ bool GiveStockItem(int client, int itemdef, int preferredClass, int clip, int re
 	TranslateItemClass(it.itemClass, family, classname, sizeof(classname));
 	if (!classname[0] || IsBlockedStockClassname(classname))
 		return false;
+	if (slot == SLOT_SECONDARY && StrEqual(classname, "tf_weapon_shotgun_primary"))
+	{
+		strcopy(classname, sizeof(classname), "tf_weapon_shotgun_soldier");
+		family = 3;   // TFClass_Soldier: secondary-slot shotgun script, ammo and arms
+	}
 
 	ReplaceSlot(client, slot, dropOld);
 	int ent = CreateAndEquip(client, classname, itemdef, family, STOCK_ITEM);
@@ -1479,6 +1529,7 @@ bool OtherSlotSharesType(int client, int slot, int type)
 
 public void Hook_WeaponSwitchPost(int client, int weapon)
 {
+	g_flForceDonorSync[client] = GetGameTime() + 1.0;
 	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsRoleClass(client))
 		return;
 
@@ -2090,7 +2141,7 @@ bool RoleCanPickup(int client)
 }
 
 /** Spawn a ground pickup for the weapon in a slot (owner keeps nothing). */
-int SpawnPickupFromSlot(int client, int slot, float upVel)
+int SpawnPickupFromSlot(int client, int slot, float upVel, bool deathDrop = false)
 {
 	int weaponIdx = g_Inv[client][slot].weapon;
 	int ent = EntRefToEntIndex(g_Inv[client][slot].entRef);
@@ -2100,7 +2151,8 @@ int SpawnPickupFromSlot(int client, int slot, float upVel)
 	{
 		WeaponDef w;
 		g_Weapons.GetArray(weaponIdx, w);
-		if (!w.droppable)
+		// "always_drop" (Civilian umbrella) overrides "droppable 0" on death.
+		if (!w.droppable && !(deathDrop && w.alwaysDrop))
 			return -1;
 	}
 
@@ -2329,6 +2381,9 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 {
 	if (IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
 		ClampReserves(client);
+	if (g_sLoopSnd[client][0] && (!IsPlayerAlive(client) || EntRefToEntIndex(g_iLoopEnt[client]) != GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")
+		|| (!(buttons & IN_ATTACK) && GetGameTime() - g_flLoopAt[client] > 0.15)))
+		StopLoopSound(client);
 	if ((buttons & IN_ATTACK2) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
 	{
 		int act = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
@@ -2493,6 +2548,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (!TF2CC_IsValidClient(client) || TF2CC_GetRole(client) == TF2CC_ROLE_NONE)
 		return;
+	StopLoopSound(client);
 	// Remember custom weapons so the stock death drop of their donors is removed.
 	g_flDiedAt[client] = GetGameTime();
 	GetClientAbsOrigin(client, g_vecDiedAt[client]);
@@ -2517,7 +2573,7 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 		if (slot >= 0 && (always || !IsDefaultLoadoutWeapon(client, slot)))
 		{
 			SyncAmmoFromEntity(client, slot);
-			SpawnPickupFromSlot(client, slot, 60.0);
+			SpawnPickupFromSlot(client, slot, 60.0, true);
 		}
 	}
 	RemoveOverlay(client);
@@ -2714,6 +2770,13 @@ public Action Hook_Sound(int clients[MAXPLAYERS], int &numClients, char sample[P
 		if (StrEqual(norm, find))
 		{
 			w.sounds.GetString(i + 1, sample, sizeof(sample));
+			if (w.soundsLoop)
+			{
+				strcopy(g_sLoopSnd[owner], sizeof(g_sLoopSnd[]), sample);
+				g_iLoopEnt[owner] = EntIndexToEntRef(entity);
+				g_iLoopChan[owner] = channel;
+				g_flLoopAt[owner] = GetGameTime();
+			}
 			EchoToOwner(owner, clients, numClients, sample, entity, channel, volume, level, pitch, flags);
 			return Plugin_Changed;
 		}

@@ -59,6 +59,10 @@ ConVar g_cvPf2Delay, g_cvPf2Heal, g_cvPf2Damage, g_cvPf2Range, g_cvPf2InfectTime
 bool g_bModelDrgBall;
 char g_sBombLog[PLATFORM_MAX_PATH];
 bool g_bModelNail;
+int g_iNailModelIndex;
+int g_iBurstShots[MAXPLAYERS + 1];
+float g_flBurstLast[MAXPLAYERS + 1];
+int g_iBurstWeapon[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 bool g_bModelDynamite;
 #define BOMBLET_DYNAMITE 1
 #define BOMBLET_GIB 2
@@ -180,6 +184,8 @@ public void OnPluginStart()
 	AddCommandListener(Listener_ActionSlot, "+use_action_slot_item");
 	AddCommandListener(Listener_ActionSlotUp, "-use_action_slot_item");
 	HookEvent("player_spawn", Event_Spawn);
+	HookEvent("player_death", Event_DeathStopLoops);
+	AddTempEntHook("EffectDispatch", TE_EffectDispatch);
 	CreateTimer(0.5, Timer_Perks, _, TIMER_REPEAT);
 }
 
@@ -193,7 +199,8 @@ public void OnMapStart()
 	g_iBeamGlow = PrecacheModel("materials/sprites/glow01.vmt", true);
 	g_bModelBomblet = PrecacheModel(BOMBLET_MODEL, true) != 0;
 	g_bModelDynamite = PrecacheModel(DYNAMITE_MODEL, true) != 0;
-	g_bModelNail = PrecacheModel(NAIL_MODEL, true) != 0;
+	g_iNailModelIndex = PrecacheModel(NAIL_MODEL, true);
+	g_bModelNail = g_iNailModelIndex != 0;
 	g_bModelDrgBall = PrecacheModel(DRG_BALL_MODEL, true) != 0;
 	BuildPath(Path_SM, g_sBombLog, sizeof(g_sBombLog), "logs/tf2cc_bomblets.log");
 	ParticleIndex("drg_cow_explosioncore_normal");
@@ -217,7 +224,95 @@ bool ActiveSpecial(int client, char[] special, int maxlen)
 
 /* ---------------- medkit ---------------- */
 
+/* ========================================================================= */
+/* Burst fire (OF assault rifle: BurstSize 3, TimeFireDelay 0.07,            */
+/* BurstFireDelay 0.30; one press fires the whole burst). Special "burst",   */
+/* value = delay after a burst.                                              */
+/* ========================================================================= */
+
+/** Called per shot from TF2_CalcIsAttackCritical. */
+void BurstOnAttack(int client, int weapon, const char[] special, float v)
+{
+	if (!StrEqual(special, "burst"))
+		return;
+	float now = GetGameTime();
+	if (now - g_flBurstLast[client] > 0.25 || EntRefToEntIndex(g_iBurstWeapon[client]) != weapon)
+		g_iBurstShots[client] = 0;
+	g_flBurstLast[client] = now;
+	g_iBurstWeapon[client] = EntIndexToEntRef(weapon);
+	if (++g_iBurstShots[client] >= 3)
+	{
+		g_iBurstShots[client] = 0;
+		// PrimaryAttack sets m_flNextPrimaryAttack after this forward: push it next frame.
+		DataPack dp = new DataPack();
+		dp.WriteCell(EntIndexToEntRef(weapon));
+		dp.WriteFloat(now + 0.07 + (v > 0.0 ? v : 0.30));
+		RequestFrame(Frame_BurstPause, dp);
+	}
+}
+
+public void Frame_BurstPause(DataPack dp)
+{
+	dp.Reset();
+	int weapon = EntRefToEntIndex(dp.ReadCell());
+	float next = dp.ReadFloat();
+	delete dp;
+	if (weapon > MaxClients && GetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack") < next)
+		SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", next);
+}
+
+/** Mid-burst the trigger stays held (server-side) until the burst is out. */
+bool BurstHold(int client, int &buttons)
+{
+	if (g_iBurstShots[client] <= 0 || GetGameTime() - g_flBurstLast[client] > 0.2 || (buttons & IN_ATTACK))
+		return false;
+	int act = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (act <= MaxClients || EntRefToEntIndex(g_iBurstWeapon[client]) != act || GetEntProp(act, Prop_Send, "m_iClip1") <= 0)
+	{
+		g_iBurstShots[client] = 0;
+		return false;
+	}
+	buttons |= IN_ATTACK;
+	return true;
+}
+
+/**
+ * Syringe-gun projectiles are client-side temp entities drawn from the
+ * "ClientProjectile_Syringe" effect, whose m_nMaterial is the model index
+ * (the server entity is never sent). Nailgun shots get the nail model for
+ * every other client; the shooter's own predicted copies stay syringes.
+ */
+public Action TE_EffectDispatch(const char[] te_name, const int[] players, int numClients, float delay)
+{
+	if (!g_bModelNail)
+		return Plugin_Continue;
+	static int table = INVALID_STRING_TABLE;
+	static int syringeIdx = -1;
+	if (table == INVALID_STRING_TABLE)
+		table = FindStringTable("EffectDispatch");
+	if (table == INVALID_STRING_TABLE)
+		return Plugin_Continue;
+	if (syringeIdx < 0)
+		syringeIdx = FindStringIndex(table, "ClientProjectile_Syringe");
+	if (syringeIdx < 0 || TE_ReadNum("m_iEffectName") != syringeIdx)
+		return Plugin_Continue;
+	int owner = TE_ReadNum("entindex");
+	if (owner < 1 || owner > MaxClients || !IsClientInGame(owner))
+		return Plugin_Continue;
+	char special[32];
+	if (ActiveSpecial(owner, special, sizeof(special)) && StrEqual(special, "nails"))
+		TE_WriteNum("m_nMaterial", g_iNailModelIndex);
+	return Plugin_Continue;
+}
+
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
+{
+	bool burstHeld = IsPlayerAlive(client) && BurstHold(client, buttons);
+	Action r = RunCmdSpecials(client, buttons, impulse, weapon);
+	return burstHeld && r == Plugin_Continue ? Plugin_Changed : r;
+}
+
+Action RunCmdSpecials(int client, int &buttons, int &impulse, int &weapon)
 {
 	if (IsPlayerAlive(client))
 		GatlingThink(client);
@@ -320,8 +415,40 @@ public void OnEntityCreated(int entity, const char[] classname)
 		SDKHook(entity, SDKHook_SpawnPost, Hook_NailSpawned);
 }
 
+/**
+ * Loop sources live on the weapon and were only stopped from OnPlayerRunCmd
+ * while alive: death, disconnect or removal of the weapon left the chaingun
+ * fire / chainsaw idle playing for everyone.
+ */
+void StopLoopSounds(int client)
+{
+	int gat = EntRefToEntIndex(g_iGatWeapon[client]);
+	if (gat > MaxClients)
+		GatlingStop(client, gat, false);
+	g_iGatWeapon[client] = INVALID_ENT_REFERENCE;
+	g_iGatState[client] = 0;
+	g_sGatFire[client][0] = '\0';
+	int cs = EntRefToEntIndex(g_iCsWeapon[client]);
+	if (cs > MaxClients)
+		ChainsawStop(client, cs);
+}
+
+public void Event_DeathStopLoops(Event event, const char[] name, bool dontBroadcast)
+{
+	int client = GetClientOfUserId(event.GetInt("userid"));
+	if (client)
+		StopLoopSounds(client);
+}
+
 public void OnEntityDestroyed(int entity)
 {
+	if (entity > MaxClients && IsValidEdict(entity))
+	{
+		int ref = EntIndexToEntRef(entity);
+		for (int i = 1; i <= MaxClients; i++)
+			if (g_iGatWeapon[i] == ref || g_iCsWeapon[i] == ref)
+				StopLoopSounds(i);
+	}
 	if (entity <= MaxClients || entity >= sizeof(g_iBombParent))
 		return;
 	if (g_iBomblet[entity])
@@ -415,7 +542,10 @@ public Action TF2_CalcIsAttackCritical(int client, int weapon, char[] weaponname
 		return Plugin_Continue;
 	char special[32];
 	float value;
-	if (!TF2CC_GetWeaponSpecial(weapon, special, sizeof(special), value) || StrContains(special, "lightning") != 0)
+	if (!TF2CC_GetWeaponSpecial(weapon, special, sizeof(special), value))
+		return Plugin_Continue;
+	BurstOnAttack(client, weapon, special, value);
+	if (StrContains(special, "lightning") != 0)
 		return Plugin_Continue;
 	FireBeam(client, weapon, g_cvLgDamage.FloatValue, g_cvLgRange.FloatValue, g_cvLgWidth.FloatValue, 0.06, result || IsCritBoosted(client));
 	return Plugin_Continue;
@@ -1347,6 +1477,7 @@ public Action Hook_ChainsawSounds(int clients[MAXPLAYERS], int &numClients, char
 
 public void OnClientDisconnect(int client)
 {
+	StopLoopSounds(client);
 	g_iCsState[client] = CS_IDLE;
 	g_iCsWeapon[client] = INVALID_ENT_REFERENCE;
 	g_flCsChargeEnd[client] = 0.0;

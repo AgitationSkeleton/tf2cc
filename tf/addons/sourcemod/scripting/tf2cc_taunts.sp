@@ -34,6 +34,7 @@
 
 native bool TF2CC_Speak(int client, const char[] concept, bool force = false);
 native bool TF2CC_GetWeaponId(int weapon, char[] id, int maxlen);
+native bool TF2CC_RefreshWeaponVisuals(int client);
 
 public Plugin myinfo =
 {
@@ -60,12 +61,16 @@ int g_iTauntWeapon[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 Handle g_hEndTimer[MAXPLAYERS + 1];
 float g_flNextTaunt[MAXPLAYERS + 1];
 float g_flTauntYaw[MAXPLAYERS + 1];
+float g_flTauntStart[MAXPLAYERS + 1];
+float g_flTauntLen[MAXPLAYERS + 1];
+bool g_bFlexClone[MAXPLAYERS + 1];
 ArrayList g_aHidden[MAXPLAYERS + 1];   // wearables this taunt hid (restore only those)
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	MarkNativeAsOptional("TF2CC_Speak");
 	MarkNativeAsOptional("TF2CC_GetWeaponId");
+	MarkNativeAsOptional("TF2CC_RefreshWeaponVisuals");
 	RegPluginLibrary("tf2cc_taunts");
 	return APLRes_Success;
 }
@@ -74,7 +79,7 @@ public void OnPluginStart()
 {
 	g_cvEnabled = CreateConVar("tf2cc_taunts_enabled", "1", "Enable experimental sequence taunts for roles.", _, true, 0.0, true, 1.0);
 	// tf_taunt_prop crashed the server when driven without a scene (play-test 2026-11-10).
-	g_cvPropClass = CreateConVar("tf2cc_taunts_prop_class", "prop_dynamic_override", "Clone entity: prop_dynamic_override (stable) or tf_taunt_prop (EXPERIMENTAL: crashed srcds in testing).");
+	g_cvPropClass = CreateConVar("tf2cc_taunts_prop_class", "funCBaseFlex", "Clone entity: funCBaseFlex (default: a flex entity, so the eyes look ahead; the plugin drives its animation) | prop_dynamic_override (eyes roll up, may show the reference pose at the end) | tf_taunt_prop (EXPERIMENTAL: crashed srcds in testing).");
 	g_cvDebug = CreateConVar("tf2cc_taunts_debug", "0", "1 = log which weapon id and taunt each taunt picked.", _, true, 0.0, true, 1.0);
 	g_cvMode = CreateConVar("tf2cc_taunts_mode", "clone", "clone = a prop copy plays the taunt while the player is hidden (default); player = the player model plays it (EXPERIMENTAL: eyes and lip-sync, but T-posed on a test client).");
 	AutoExecConfig(true, "tf2cc_taunts");
@@ -236,6 +241,20 @@ void StartTaunt(int client, const char[] sequence, float duration, const char[] 
 		ang[2] = 0.0;
 		TeleportEntity(prop, pos, ang, NULL_VECTOR);
 		g_iProp[client] = EntIndexToEntRef(prop);
+		g_bFlexClone[client] = HasEntProp(prop, Prop_Send, "m_viewtarget");
+		g_flTauntStart[client] = GetGameTime();
+		g_flTauntLen[client] = duration;
+		if (g_bFlexClone[client])
+		{
+			// Eyes: a flex entity aims its eyeballs at m_viewtarget (prop_dynamic
+			// cannot, so its eyes rolled up). A point ahead of the face.
+			float fwd[3], target[3];
+			GetAngleVectors(ang, fwd, NULL_VECTOR, NULL_VECTOR);
+			target[0] = pos[0] + fwd[0] * 256.0;
+			target[1] = pos[1] + fwd[1] * 256.0;
+			target[2] = pos[2] + 64.0;
+			SetEntPropVector(prop, Prop_Send, "m_viewtarget", target);
+		}
 		SetEntityRenderMode(client, RENDER_NONE);
 		if (weapon > MaxClients)
 			SetEntityRenderMode(weapon, RENDER_NONE);
@@ -346,6 +365,17 @@ void EndTaunt(int client)
 		SetEntityMoveType(client, MOVETYPE_WALK);
 	SetVariantInt(0);
 	AcceptEntityInput(client, "SetForcedTauntCam");
+	// Back in first person the Merc/Civ arms overlay sometimes stayed hidden.
+	if (IsPlayerAlive(client) && LibraryExists("tf2cc_weapons"))
+		CreateTimer(0.1, Timer_RefreshVisuals, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+}
+
+public Action Timer_RefreshVisuals(Handle timer, int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client && !IsTaunting(client))
+		TF2CC_RefreshWeaponVisuals(client);
+	return Plugin_Stop;
 }
 
 /**
@@ -398,6 +428,30 @@ public Action Timer_TauntVoice(Handle timer, DataPack dp)
 	return Plugin_Stop;
 }
 
+/**
+ * Flex clones have no animation think of their own: advance the cycle every
+ * frame over the taunt's length and hold the last frame (no reference pose
+ * between the end of the sequence and the end of the taunt).
+ */
+public void OnGameFrame()
+{
+	float now = GetGameTime();
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		if (!g_bTaunting[i] || !g_bFlexClone[i] || g_bPlayerMode[i])
+			continue;
+		int prop = EntRefToEntIndex(g_iProp[i]);
+		if (prop <= MaxClients)
+			continue;
+		float cycle = g_flTauntLen[i] > 0.0 ? (now - g_flTauntStart[i]) / g_flTauntLen[i] : 1.0;
+		if (cycle > 0.999)
+			cycle = 0.999;
+		SetEntPropFloat(prop, Prop_Send, "m_flCycle", cycle);
+		SetEntPropFloat(prop, Prop_Send, "m_flAnimTime", now);
+		SetEntPropFloat(prop, Prop_Send, "m_flPlaybackRate", 0.0);
+	}
+}
+
 /** No attacking, reloading or alt-fire while taunting. */
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
@@ -444,10 +498,13 @@ int CreateTauntActor(const char[] model, const char[] sequence, int skin)
 	}
 	char cls[64];
 	g_cvPropClass.GetString(cls, sizeof(cls));
-	int prop = StrEqual(cls, "tf_taunt_prop") ? CreateEntityByName("tf_taunt_prop") : -1;
+	int prop = StrEqual(cls, "tf_taunt_prop") || StrEqual(cls, "funCBaseFlex") ? CreateEntityByName(cls) : -1;
 	if (prop != -1)
 	{
+		PrecacheModel(model);
+		DispatchKeyValue(prop, "model", model);
 		DispatchSpawn(prop);
+		PrecacheModel(model);
 		SetEntityModel(prop, model);
 		SetEntProp(prop, Prop_Send, "m_nSkin", skin);
 		SetEntProp(prop, Prop_Send, "m_nSolidType", 0);

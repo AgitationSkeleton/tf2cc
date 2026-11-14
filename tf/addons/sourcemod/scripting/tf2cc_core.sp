@@ -311,6 +311,10 @@ void AddManifestDownloads()
 		}
 		AddFileToDownloadsTable(line);
 		added++;
+		// Viewmodel animation events play raw wave paths on the client
+		// (tools/fix_vm_sounds.py); unprecached sounds stay silent.
+		if (StrContains(line, "sound/", false) == 0)
+			PrecacheSound(line[6], true);
 	}
 	delete f;
 	DebugLog("downloads: %d added, %d missing", added, missing);
