@@ -301,6 +301,7 @@ public void OnPluginStart()
 	RegConsoleCmd("sm_dropweapon", Cmd_Drop, "Mercenary: drop the active weapon.");
 	RegConsoleCmd("sm_stash", Cmd_Stash, "Hoarder's Stash: use stored items.");
 	AddCommandListener(Listener_StashKey, "+use_action_slot_item");
+	RegAdminCmd("sm_tf2cc_givestock", Cmd_GiveStock, ADMFLAG_CHEATS, "sm_tf2cc_givestock <item def index> <target> - give a role player a stock item the way a pickup does (testing).");
 	RegAdminCmd("sm_tf2cc_give", Cmd_Give, ADMFLAG_CHEATS, "sm_tf2cc_give <weapon id> [target] - give a configured tf2cc weapon (yourself by default).");
 	RegAdminCmd("sm_tf2cc_weapons", Cmd_ListWeapons, ADMFLAG_GENERIC, "List configured tf2cc weapons and their validation status.");
 	RegAdminCmd("sm_tf2cc_inv", Cmd_Inventory, ADMFLAG_GENERIC, "Dump role players' inventory records and live weapon state.");
@@ -560,17 +561,30 @@ void AdoptInventory(int client)
 		char cls[64];
 		GetEntityClassname(ent, cls, sizeof(cls));
 		int itemdef = GetEntProp(ent, Prop_Send, "m_iItemDefinitionIndex");
-		int idx = WEAPON_NONE;
+		// Several configured weapons share a donor (umbrella and crowbar are both
+		// tf_weapon_bat 0): the role's loadout weapon wins, then one the role may use.
+		int role = TF2CC_GetRole(client);
+		char key[32], loadout[48], roleKey[32];
+		FormatEx(key, sizeof(key), "loadout_%s", g_sSlotNames[s]);
+		if (!TF2CC_GetRoleString(role, key, loadout, sizeof(loadout)))
+			loadout[0] = '\0';
+		TF2CC_GetRoleKey(role, roleKey, sizeof(roleKey));
+		int idx = WEAPON_NONE, score = -1;
 		WeaponDef w;
 		for (int i = 0; i < g_Weapons.Length; i++)
 		{
 			g_Weapons.GetArray(i, w);
-			if (w.itemdef == itemdef && StrEqual(w.classname, cls) && w.slot == s)
+			if (w.itemdef != itemdef || !StrEqual(w.classname, cls) || w.slot != s)
+				continue;
+			int sc = StrEqual(w.id, loadout) ? 2 : (StrContains(w.roles, roleKey) != -1 ? 1 : 0);
+			if (sc > score)
 			{
+				score = sc;
 				idx = i;
-				break;
 			}
 		}
+		if (idx >= 0)
+			g_Weapons.GetArray(idx, w);
 		int maxReserve = idx >= 0 && w.reserve > 0 ? w.reserve : DefaultReserve(ent, idx >= 0 ? w.family : 0);
 		StoreSlot(client, s, idx >= 0 ? idx : STOCK_ITEM, itemdef, ent, maxReserve);
 		int type = GetEntProp(ent, Prop_Send, "m_iPrimaryAmmoType");
@@ -1710,6 +1724,24 @@ void UpdateOverlay(int client)
 	if (vm <= MaxClients)
 		return;
 	int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	// Bots have no view, and a hidden viewmodel breaks them: CBaseCombatCharacter::
+	// Weapon_Switch re-deploys the held weapon when !IsWeaponVisible() (viewmodel
+	// EF_NODRAW), and TFBot calls Weapon_Switch(gun) every update, so overlaid
+	// stock pickups (minigun, grenade launcher...) never got past their deploy.
+	if (IsFakeClient(client))
+	{
+		int e = EntRefToEntIndex(g_iArmsWearable[client]);
+		if (e > MaxClients)
+			RemoveEntity(e);
+		e = EntRefToEntIndex(g_iWeaponWearable[client]);
+		if (e > MaxClients)
+			RemoveEntity(e);
+		g_iArmsWearable[client] = INVALID_ENT_REFERENCE;
+		g_iWeaponWearable[client] = INVALID_ENT_REFERENCE;
+		SetEntProp(vm, Prop_Send, "m_fEffects", GetEntProp(vm, Prop_Send, "m_fEffects") & ~EF_NODRAW);
+		UpdateWorldModel(client, active);
+		return;
+	}
 	int armsIdx = PrecacheModel(arms, true);
 	int armsEnt = EntRefToEntIndex(g_iArmsWearable[client]);
 
@@ -2584,6 +2616,35 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 /* ========================================================================= */
 /* Admin / validation                                                        */
 /* ========================================================================= */
+
+public Action Cmd_GiveStock(int client, int args)
+{
+	if (args < 2)
+	{
+		ReplyToCommand(client, "Usage: sm_tf2cc_givestock <item def index> <target>");
+		return Plugin_Handled;
+	}
+	char a[16], t[64];
+	GetCmdArg(1, a, sizeof(a));
+	GetCmdArg(2, t, sizeof(t));
+	int target = FindTarget(client, t, false, false);
+	if (target <= 0)
+		return Plugin_Handled;
+	if (TF2CC_GetRole(target) == TF2CC_ROLE_NONE || !IsPlayerAlive(target))
+	{
+		ReplyToCommand(client, "[TF2CC] %N is not an alive role player.", target);
+		return Plugin_Handled;
+	}
+	int itemdef = StringToInt(a);
+	bool ok = GiveStockItem(target, itemdef, 0, -1, -1, true);
+	SchemaItem it;
+	int slot = ResolveSchemaItem(itemdef, it) ? MercSlotForStockItem(it) : -1;
+	int ent = slot >= 0 ? EntRefToEntIndex(g_Inv[target][slot].entRef) : -1;
+	if (ok && ent > MaxClients)
+		SwitchTo(target, ent);
+	ReplyToCommand(client, "[TF2CC] givestock %d -> %N: %s (slot %d)", itemdef, target, ok ? "ok" : "failed", slot);
+	return Plugin_Handled;
+}
 
 public Action Cmd_Give(int client, int args)
 {

@@ -183,6 +183,7 @@ Config file: `cfg/sourcemod/tf2cc_weapons.cfg`
 |---|---|---|
 | `sm_dropweapon` | everyone | Mercenary: drop the active weapon. |
 | `sm_stash` | everyone | Hoarder's Stash: use stored items. |
+| `sm_tf2cc_givestock` | admin: cheats | sm_tf2cc_givestock <item def index> <target> - give a role player a stock item the way a pickup does (testing). |
 | `sm_tf2cc_give` | admin: cheats | sm_tf2cc_give <weapon id> [target] - give a configured tf2cc weapon (yourself by default). |
 | `sm_tf2cc_weapons` | admin: generic | List configured tf2cc weapons and their validation status. |
 | `sm_tf2cc_inv` | admin: generic | Dump role players' inventory records and live weapon state. |
