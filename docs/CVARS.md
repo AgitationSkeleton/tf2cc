@@ -57,6 +57,8 @@ Config file: `cfg/sourcemod/tf2cc_core.cfg`
 | `sm_mercenary` | everyone | Become the Mercenary. |
 | `sm_civilian` | everyone | Become the Civilian. |
 | `sm_tf2cc_reload` | admin: config | Reload roles.cfg. |
+| `sm_tf2cc_selfcheck` | admin: generic | Check what tf2cc depends on after a TF2/SourceMod/TF2Attributes update (netprops, respawn hook, TF2Attributes). |
+| `sm_tf2cc_test_nohook` | admin: root | sm_tf2cc_test_nohook <0\|1> - TESTING: run class-10 transitions through the fallback path as if the ForceRespawn offset were missing. |
 | `sm_tf2cc_status` | admin: generic | Show role state of every player. |
 | `sm_tf2cc_setrole` | admin: slay | sm_tf2cc_setrole <target> <role\|none> - bots stay pinned to it until they leave. |
 

@@ -329,7 +329,11 @@ public void OnPluginStart()
 				OnClientPutInServer(client);
 }
 
-public void OnAllPluginsLoaded() { g_bTF2Attributes = LibraryExists("tf2attributes"); }
+public void OnAllPluginsLoaded()
+{
+	g_bTF2Attributes = LibraryExists("tf2attributes");
+	ValidateAttributes(0, false);
+}
 public void OnLibraryAdded(const char[] name) { if (StrEqual(name, "tf2attributes")) g_bTF2Attributes = true; }
 public void OnLibraryRemoved(const char[] name) { if (StrEqual(name, "tf2attributes")) g_bTF2Attributes = false; }
 
@@ -1144,7 +1148,7 @@ int CreateAndEquip(int client, const char[] classname, int itemdef, int family, 
 		for (int i = 0; i < w.attrCount; i++)
 		{
 			g_Attrs.GetArray(w.attrStart + i, a);
-			TF2Attrib_SetByName(ent, a.name, a.value);
+			ApplyAttr(ent, a.name, a.value);
 		}
 		TF2Attrib_ClearCache(ent);
 	}
@@ -2375,6 +2379,9 @@ bool TryPickupStock(int client, int dropped, bool force)
 		return false;
 	}
 
+	// TF2 keeps a dropped weapon's clip/reserve in fields it neither networks nor
+	// exposes in the datamap (checked 2026-11-14), so the pickup gets a full clip
+	// and the default reserve; the reads stay for a future TF2 that exposes them.
 	int clip = HasEntProp(dropped, Prop_Send, "m_nClip") ? GetEntProp(dropped, Prop_Send, "m_nClip") : -1;
 	int reserve = HasEntProp(dropped, Prop_Send, "m_nAmmo") ? GetEntProp(dropped, Prop_Send, "m_nAmmo") : -1;
 	ItemSnapshot snap;
@@ -2771,6 +2778,56 @@ void ValidateWeapons(int reply, bool doReply)
 	}
 	if (doReply)
 		ReplyToCommand(reply, "[TF2CC] %d weapon(s), %d problem(s).", g_Weapons.Length, bad);
+	ValidateAttributes(reply, doReply);
+}
+
+/**
+ * Item schema updates can rename or retire attributes; TF2Attrib_SetByName then
+ * fails and the weapon silently loses that stat. Check every configured name
+ * (all profiles) against the live schema. Returns the problem count, -1 when
+ * TF2Attributes (or its name check) is unavailable.
+ */
+int ValidateAttributes(int reply, bool doReply)
+{
+	if (g_Attrs == null || !g_bTF2Attributes
+		|| GetFeatureStatus(FeatureType_Native, "TF2Attrib_IsValidAttributeName") != FeatureStatus_Available)
+	{
+		if (doReply)
+			ReplyToCommand(reply, "[TF2CC] attribute names not checked (TF2Attributes unavailable).");
+		return -1;
+	}
+	StringMap seen = new StringMap();
+	AttrDef a;
+	int bad = 0, total = 0;
+	for (int i = 0; i < g_Attrs.Length; i++)
+	{
+		g_Attrs.GetArray(i, a);
+		if (!seen.SetValue(a.name, true, false))
+			continue;
+		total++;
+		if (TF2Attrib_IsValidAttributeName(a.name))
+			continue;
+		bad++;
+		LogError("tf2cc_weapons: attribute '%s' is not in the item schema (renamed or removed by a TF2 update?)", a.name);
+		if (doReply)
+			ReplyToCommand(reply, "  UNKNOWN attribute '%s'", a.name);
+	}
+	delete seen;
+	if (doReply)
+		ReplyToCommand(reply, "[TF2CC] %d attribute name(s), %d unknown.", total, bad);
+	return bad;
+}
+
+/** TF2Attrib_SetByName, logging each rejected name once. */
+void ApplyAttr(int ent, const char[] name, float value)
+{
+	static StringMap s_bad;
+	if (TF2Attrib_SetByName(ent, name, value))
+		return;
+	if (s_bad == null)
+		s_bad = new StringMap();
+	if (s_bad.SetValue(name, true, false))
+		LogError("tf2cc_weapons: TF2Attributes rejected attribute '%s' (value %.3f)", name, value);
 }
 
 /* ========================================================================= */
@@ -3337,7 +3394,7 @@ bool ReapplyCustomAttributes(int ent, int weaponIdx)
 	for (int i = 0; i < w.attrCount; i++)
 	{
 		g_Attrs.GetArray(w.attrStart + i, a);
-		TF2Attrib_SetByName(ent, a.name, a.value);
+		ApplyAttr(ent, a.name, a.value);
 	}
 	TF2Attrib_ClearCache(ent);
 	return true;

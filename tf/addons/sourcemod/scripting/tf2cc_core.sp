@@ -189,6 +189,8 @@ public void OnPluginStart()
 	// No "sm_civ": the stock-pose plugin civilian.smx on every server owns it.
 	RegConsoleCmd("sm_civilian", Cmd_Civ, "Become the Civilian.");
 	RegAdminCmd("sm_tf2cc_reload", Cmd_Reload, ADMFLAG_CONFIG, "Reload roles.cfg.");
+	RegAdminCmd("sm_tf2cc_selfcheck", Cmd_SelfCheck, ADMFLAG_GENERIC, "Check what tf2cc depends on after a TF2/SourceMod/TF2Attributes update (netprops, respawn hook, TF2Attributes).");
+	RegAdminCmd("sm_tf2cc_test_nohook", Cmd_TestNoHook, ADMFLAG_ROOT, "sm_tf2cc_test_nohook <0|1> - TESTING: run class-10 transitions through the fallback path as if the ForceRespawn offset were missing.");
 	RegAdminCmd("sm_tf2cc_status", Cmd_Status, ADMFLAG_GENERIC, "Show role state of every player.");
 	RegAdminCmd("sm_tf2cc_setrole", Cmd_SetRoleAdmin, ADMFLAG_SLAY, "sm_tf2cc_setrole <target> <role|none> - bots stay pinned to it until they leave.");
 
@@ -206,6 +208,7 @@ public void OnPluginStart()
 	HookEvent("player_team", Event_PlayerTeam);
 
 	SetupForceRespawnHook();
+	SelfCheck(0, false);
 	LoadRoles();
 	HookPlayerResource();
 	HookRespawnRooms();
@@ -464,6 +467,95 @@ int FindRoleByKey(const char[] key)
 }
 
 /* ------------------------------------------------------------------------- */
+/* Update resilience self-check                                              */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * TF2-specific network properties tf2cc reads or writes, by the server class
+ * that owns them (FindSendPropInfo also searches base classes). Base-engine
+ * properties (m_fEffects, m_hActiveWeapon, m_iAmmo...) are not listed: Source
+ * has never renamed them. Item defs are checked by sm_tf2cc_weapons, attribute
+ * names by tf2cc_weapons ValidateAttributes.
+ */
+static const char g_sSelfProps[][][] =
+{
+	{ "CTFPlayer", "m_iszCustomModel" },
+	{ "CTFPlayer", "m_bUseClassAnimations" },
+	{ "CTFPlayer", "m_bCustomModelRotates" },
+	{ "CTFPlayer", "m_nForceTauntCam" },
+	{ "CTFPlayer", "m_iDesiredPlayerClass" },
+	{ "CTFPlayer", "m_nDisguiseClass" },
+	{ "CTFPlayer", "m_nDisguiseTeam" },
+	{ "CTFPlayer", "m_bHasPasstimeBall" },
+	{ "CTFPlayer", "m_bSaveMeParity" },
+	{ "CTFPlayerResource", "m_iPlayerClass" },
+	{ "CTFWeaponBase", "m_bBeingRepurposedForTaunt" },
+	{ "CTFWeaponBase", "m_nCustomViewmodelModelIndex" },
+	{ "CTFWeaponBase", "m_iItemDefinitionIndex" },
+	{ "CTFWeaponBase", "m_bValidatedAttachedEntity" },
+	{ "CTFWeaponBase", "m_bInitialized" },
+	{ "CTFWeaponBase", "m_iEntityLevel" },
+	{ "CTFWeaponBase", "m_iEntityQuality" },
+	{ "CTFWeaponBase", "m_iAccountID" },
+	{ "CTFWeaponBase", "m_flEffectBarRegenTime" },
+	{ "CTFMinigun", "m_iWeaponState" },
+	{ "CTFFlameThrower", "m_iWeaponState" },
+	{ "CTFWearable", "m_hWeaponAssociatedWith" },
+	{ "CTFWearableVM", "m_hWeaponAssociatedWith" },
+	{ "CTFDroppedWeapon", "m_flChargeLevel" },
+	{ "CTFAmmoPack", "m_vecInitialVelocity" },
+	{ "CTFGrenadePipebombProjectile", "m_hLauncher" },
+	{ "CTFBaseRocket", "m_hOriginalLauncher" },
+	{ "CBaseFlex", "m_viewtarget" }
+};
+
+int SelfCheck(int reply, bool doReply)
+{
+	int bad = 0;
+	for (int i = 0; i < sizeof(g_sSelfProps); i++)
+	{
+		if (FindSendPropInfo(g_sSelfProps[i][0], g_sSelfProps[i][1]) > 0)
+			continue;
+		bad++;
+		LogError("tf2cc selfcheck: netprop %s::%s missing (renamed or removed by a TF2 update?)", g_sSelfProps[i][0], g_sSelfProps[i][1]);
+		if (doReply)
+			ReplyToCommand(reply, "  MISSING netprop %s::%s", g_sSelfProps[i][0], g_sSelfProps[i][1]);
+	}
+	if (!g_bForceRespawnHook)
+	{
+		bad++;
+		LogError("tf2cc selfcheck: ForceRespawn hook unavailable (sm-tf2.games offset); fallback transition path in use");
+	}
+	if (doReply)
+	{
+		ReplyToCommand(reply, "[TF2CC] netprops: %d checked, %d missing", sizeof(g_sSelfProps), bad - (g_bForceRespawnHook ? 0 : 1));
+		ReplyToCommand(reply, "[TF2CC] ForceRespawn hook: %s | TF2Attributes: %s | SourceMod %s", g_bForceRespawnHook ? "yes" : "NO (fallback path)",
+			g_bTF2Attributes ? "loaded" : "NOT loaded (health/speed hook fallback, no weapon attributes)", SOURCEMOD_VERSION);
+		ReplyToCommand(reply, "[TF2CC] item defs: sm_tf2cc_weapons | attribute names: checked by tf2cc_weapons (see error log)");
+	}
+	return bad;
+}
+
+public Action Cmd_SelfCheck(int client, int args)
+{
+	SelfCheck(client, true);
+	return Plugin_Handled;
+}
+
+public Action Cmd_TestNoHook(int client, int args)
+{
+	char a[4];
+	GetCmdArg(1, a, sizeof(a));
+	bool simulate = StringToInt(a) != 0;
+	if (simulate)
+		g_bForceRespawnHook = false;
+	else
+		SetupForceRespawnHook();
+	ReplyToCommand(client, "[TF2CC] ForceRespawn hook %s (affects transitions from the next spawn)", g_bForceRespawnHook ? "ACTIVE" : "DISABLED - fallback path");
+	return Plugin_Handled;
+}
+
+/* ------------------------------------------------------------------------- */
 /* ForceRespawn hook: the only place the network class becomes 10            */
 /* ------------------------------------------------------------------------- */
 
@@ -489,7 +581,7 @@ void SetupForceRespawnHook()
 
 public MRESReturn Hook_ForceRespawnPre(int client)
 {
-	if (!g_cvEnabled.BoolValue || !IsClientInGame(client))
+	if (!g_bForceRespawnHook || !g_cvEnabled.BoolValue || !IsClientInGame(client))
 		return MRES_Ignored;
 
 	if (g_bRandomEachLife[client] && !g_bJustRolled[client])
@@ -517,6 +609,8 @@ public MRESReturn Hook_ForceRespawnPre(int client)
 
 public MRESReturn Hook_ForceRespawnPost(int client)
 {
+	if (!g_bForceRespawnHook)
+		return MRES_Ignored;
 	if (g_bInForceRespawn[client])
 	{
 		g_bInForceRespawn[client] = false;
@@ -732,23 +826,32 @@ void ApplyStats(int client, int role, bool fillHealth)
 	float baseSpeed = g_cvBaseSpeed.FloatValue;
 	int baseHealth = g_cvBaseHealth.IntValue;
 
+	// Player attributes are networked, so client movement prediction agrees. If
+	// TF2Attributes is missing or rejects a name (schema rename, gamedata break),
+	// that stat falls back to the hook path instead of silently staying stock.
+	bool attrHealth = g_bTF2Attributes
+		&& TF2Attrib_SetByName(client, "max health additive penalty", float(def.health - baseHealth));
+	bool attrSpeed = g_bTF2Attributes
+		&& (baseSpeed <= 0.0 || TF2Attrib_SetByName(client, "move speed penalty", def.speed / baseSpeed));
 	if (g_bTF2Attributes)
 	{
-		// Player attributes are networked, so client movement prediction agrees.
-		TF2Attrib_SetByName(client, "max health additive penalty", float(def.health - baseHealth));
-		if (baseSpeed > 0.0)
-			TF2Attrib_SetByName(client, "move speed penalty", def.speed / baseSpeed);
 		TF2Attrib_ClearCache(client);
 		// Max speed is only recalculated on condition/state changes; nudge it.
 		TF2_AddCondition(client, TFCond_SpeedBuffAlly, 0.001);
+		static bool warned;
+		if ((!attrHealth || !attrSpeed) && !warned)
+		{
+			warned = true;
+			LogError("tf2cc: TF2Attributes rejected %s%s; using the hook fallback for it",
+				attrHealth ? "" : "\"max health additive penalty\" ", attrSpeed ? "" : "\"move speed penalty\"");
+		}
 	}
-	else
-	{
-		SDKUnhook(client, SDKHook_GetMaxHealth, Hook_GetMaxHealth);
+	SDKUnhook(client, SDKHook_GetMaxHealth, Hook_GetMaxHealth);
+	if (!attrHealth)
 		SDKHook(client, SDKHook_GetMaxHealth, Hook_GetMaxHealth);
-		SDKUnhook(client, SDKHook_PreThinkPost, Hook_SpeedThink);
+	SDKUnhook(client, SDKHook_PreThinkPost, Hook_SpeedThink);
+	if (!attrSpeed)
 		SDKHook(client, SDKHook_PreThinkPost, Hook_SpeedThink);
-	}
 
 	if (fillHealth)
 		SetEntityHealth(client, def.health);
