@@ -66,6 +66,8 @@ public Plugin myinfo =
 static const char g_sSlotNames[][] = { "primary", "secondary", "melee", "utility" };
 GlobalForward g_fwdPerk;
 ConVar g_cvProfile;
+ConVar g_cvCivDerringer;   // civ_backupplan (MarxVee Civilian_1_Backup_Plan derringer)
+ConVar g_cvCivCashwad;     // civ_cashwad
 
 // Index = TFClassType. Raw names used by arms files and items_game used_by_classes.
 static const char g_sClassArmsName[][] = { "", "scout", "sniper", "soldier", "demo", "medic", "heavy", "pyro", "spy", "engineer" };
@@ -134,6 +136,7 @@ enum struct ItemSnapshot
 }
 
 ItemSnapshot g_NoSnap;   // quality/level -1, no attributes (OnPluginStart)
+bool g_bKeepStockLook;   // GiveStockItemSnap: the item has a look, keep its own first-person model
 
 ArrayList g_Weapons;
 ArrayList g_Attrs;
@@ -220,6 +223,13 @@ ConVar g_cvPackRespawn;
 ConVar g_cvPickupLifetime;
 ConVar g_cvAutoPickupEmpty;
 ConVar g_cvDropOnDeath;
+ConVar g_cvMedigunUber;
+ConVar g_cvHealBeam;
+int g_iBeamFx[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // heal beam info_particle_system (CP0, at the hand)
+int g_iBeamCp[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // its control point 1 on the patient
+int g_iBeamTarget[MAXPLAYERS + 1];
+char g_sBeamEffect[MAXPLAYERS + 1][40];
+ConVar g_cvDropDefault;
 ConVar g_cvStockPickups;
 ConVar g_cvCustomVM;
 
@@ -253,7 +263,23 @@ public any Native_RefreshWeaponVisuals(Handle plugin, int numParams)
 	if (client < 1 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client)
 		|| TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsRoleClass(client))
 		return false;
+	// The client re-evaluates a wearable's visibility (CEconWearable::ShouldDraw:
+	// viewmodel wearables only while the owner is not drawn) only in
+	// OnDataChanged. When the forced taunt camera ends nothing about the arms
+	// changes, so they stayed hidden in first person. Flip an unused effects bit
+	// on each call: a data update, and with it UpdateVisibility(). tf2cc_taunts
+	// calls this a few times while the camera swings back.
 	UpdateOverlay(client);
+	int refs[3];
+	refs[0] = g_iArmsWearable[client];
+	refs[1] = g_iWeaponWearable[client];
+	refs[2] = g_iWorldWearable[client];
+	for (int i = 0; i < 3; i++)
+	{
+		int e = EntRefToEntIndex(refs[i]);
+		if (e > MaxClients)
+			SetEntProp(e, Prop_Send, "m_fEffects", GetEntProp(e, Prop_Send, "m_fEffects") ^ EF_NORECEIVESHADOW);
+	}
 	g_flForceDonorSync[client] = GetGameTime() + 1.0;
 	return true;
 }
@@ -329,7 +355,11 @@ public void OnPluginStart()
 	g_cvPackRespawn = CreateConVar("tf2cc_ammopack_respawn", "10.0", "Seconds before a map ammo pack consumed by a role player reappears.");
 	g_cvPickupLifetime = CreateConVar("tf2cc_pickup_lifetime", "30.0", "Seconds a dropped Mercenary weapon stays on the ground.");
 	g_cvAutoPickupEmpty = CreateConVar("tf2cc_pickup_auto_empty_slot", "1", "Touching a weapon whose slot is empty picks it up automatically (OF behaviour).", _, true, 0.0, true, 1.0);
-	g_cvDropOnDeath = CreateConVar("tf2cc_drop_on_death", "1", "Mercenary drops his active non-default weapon on death.", _, true, 0.0, true, 1.0);
+	g_cvMedigunUber = CreateConVar("tf2cc_medigun_uber", "1", "Role players' deployed medigun charges (Medi Gun / Kritzkrieg / Quick-Fix) apply their effect; the game only applies them for Medics.", _, true, 0.0, true, 1.0);
+	g_cvHealBeam = CreateConVar("tf2cc_medigun_beam", "1", "Draw the medigun heal beam for role players (the client only draws it for Medics).", _, true, 0.0, true, 1.0);
+	CreateTimer(0.1, Timer_Medigun, _, TIMER_REPEAT);
+	g_cvDropOnDeath = CreateConVar("tf2cc_drop_on_death", "1", "Mercenary drops his active weapon on death.", _, true, 0.0, true, 1.0);
+	g_cvDropDefault = CreateConVar("tf2cc_drop_default_on_death", "1", "1 = like OF (CTFPlayer::Event_Killed/DropWeapon) the default pistol/crowbar drop too, and an undroppable active weapon (Fists) drops the best other weapon instead; 0 = only non-default active weapons.", _, true, 0.0, true, 1.0);
 	g_cvCritGlow = CreateConVar("tf2cc_crit_glow", "1", "Show the stock crit/mini-crit weapon glow (critgun_weaponmodel_<team>) on custom weapons' world and view models while the holder is boosted.", _, true, 0.0, true, 1.0);
 	g_cvStockPickups = CreateConVar("tf2cc_stock_pickups", "1", "Mercenary may pick up weapons dropped by any class (tf_dropped_weapon).", _, true, 0.0, true, 1.0);
 	g_cvCustomVM = CreateConVar("tf2cc_viewmodel_mode", "auto", "First-person viewmodels: auto (OF/TF2C v_model when generated, else role arms) | custom | family. Per-weapon \"viewmodel_mode\" overrides.");
@@ -355,6 +385,10 @@ public void OnPluginStart()
 	g_Pickups = new StringMap();
 	g_cvProfile = CreateConVar("tf2cc_weapon_profile", "source", "Weapon behaviour profile: source (Open Fortress / TF2 Classic accurate) | marxvee (legacy MarxVee tuning). Per-weapon \"profile\" in weapons.cfg overrides. Applies from the next spawn.");
 	g_cvProfile.AddChangeHook(OnProfileChanged);
+	g_cvCivDerringer = CreateConVar("tf2cc_civ_derringer", "0", "MarxVee Civilian derringer (civ_backupplan, \"Backup Plan\"): 1 = available (ammo packs, pickups, loadout), 0 = off and taken from anyone holding it. Overrides its weapons.cfg \"enabled\".", _, true, 0.0, true, 1.0);
+	g_cvCivCashwad = CreateConVar("tf2cc_civ_cashwad", "0", "MarxVee Civilian cash wad (civ_cashwad): 1 = available, 0 = off and taken from anyone holding it. Overrides its weapons.cfg \"enabled\".", _, true, 0.0, true, 1.0);
+	g_cvCivDerringer.AddChangeHook(OnCivItemChanged);
+	g_cvCivCashwad.AddChangeHook(OnCivItemChanged);
 	LoadWeapons();
 	AddNormalSoundHook(Hook_Sound);
 
@@ -402,8 +436,11 @@ void LateLoad()
 public void OnPluginEnd()
 {
 	for (int client = 1; client <= MaxClients; client++)
+	{
+		RemoveHealBeam(client);
 		if (IsClientInGame(client))
 			RemoveOverlay(client);
+	}
 	StringMapSnapshot snap = g_Pickups.Snapshot();
 	char key[16];
 	for (int i = 0; i < snap.Length; i++)
@@ -766,7 +803,12 @@ void LoadWeapons()
 		{
 			WeaponDef w;
 			kv.GetSectionName(w.id, sizeof(w.id));
-			if (kv.GetNum("enabled", 1) == 0)
+			int enabled = kv.GetNum("enabled", 1);
+			if (StrEqual(w.id, "civ_backupplan"))
+				enabled = g_cvCivDerringer.IntValue;
+			else if (StrEqual(w.id, "civ_cashwad"))
+				enabled = g_cvCivCashwad.IntValue;
+			if (enabled == 0)
 				continue;
 			kv.GetString("name", w.name, sizeof(w.name), w.id);
 			kv.GetString("roles", w.roles, sizeof(w.roles), "mercenary");
@@ -933,10 +975,44 @@ bool WeaponAllowedForRole(int weapon, int role)
 	return false;
 }
 
+#define DECAP_ARMS "models/weapons/tf2cc_r3/c_demo_arms_item1.mdl"
+
+/**
+ * tf_weapon_sword / tf_weapon_katana (Eyelander, Horseless Headless
+ * Horsemann's Headtaker, Nine Iron, Claidheamh Mor, Persian Persuader,
+ * Scotsman's Skullcutter, Half-Zatoichi): CTFDecapitationMeleeWeaponBase::
+ * TranslateViewmodelHandActivityInternal maps them to the Demoman's
+ * ACT_VM_*_SPECIAL "cm_" set only when the owner IS a Demoman; for class 10
+ * the item's anim_slot "item1" gives ACT_ITEM1_VM_DRAW/IDLE and plain
+ * ACT_VM_HITCENTER/SWINGHARD, none of which c_demo_arms has: no sequence, the
+ * viewmodel never animated and the weapon was not drawn. DECAP_ARMS is
+ * c_demo_arms plus a copy of c_demo_animations whose cm_ sequences carry those
+ * activities (labels i1_cm_*), so draw/idle/swing play the Demoman's sword
+ * animations. No other weapon class gates its viewmodel activities by class
+ * (the Buff Banner's override is not a melee).
+ */
+bool IsDecapWeapon(int weapon)
+{
+	char cls[32];
+	GetEntityClassname(weapon, cls, sizeof(cls));
+	return StrEqual(cls, "tf_weapon_sword") || StrEqual(cls, "tf_weapon_katana");
+}
+
 void PrecacheWeaponModels()
 {
 	if (g_Weapons == null)
 		return;
+	if (FileExists(DECAP_ARMS, true))
+		PrecacheModel(DECAP_ARMS, true);
+	// Raw .wav names in the generated viewmodels' AE_CL_PLAYSOUND (5004) events
+	// (tools: MDL event dump over models/weapons/tf2cc_r3). The owner's client
+	// plays these itself, but only sounds in the server's sound precache table:
+	// the Merc shotgun's per-shell "weapons/shotgun_reload.wav" (reload_loop)
+	// and the nailgun's draw were silent while the soundscript ones (pump) played.
+	static const char vmSounds[][] = { "weapons/shotgun_reload.wav", "weapons/nail_gun_draw.wav",
+		"weapons/umbrella_snap2.wav", "weapons/mlg_charge_up.wav", "weapons/draw_default.wav", "player/taunt_clothes_rustle.wav" };
+	for (int i = 0; i < sizeof(vmSounds); i++)
+		PrecacheSound(vmSounds[i], true);
 	WeaponDef w;
 	for (int i = 0; i < g_Weapons.Length; i++)
 	{
@@ -1223,7 +1299,7 @@ int CreateAndEquip(int client, const char[] classname, int itemdef, int family, 
 
 	// First-person arms.
 	char stockVM[PLATFORM_MAX_PATH];
-	if (!custom)
+	if (!custom && !g_bKeepStockLook)
 		StockViewModel(classname, itemdef, stockVM, sizeof(stockVM));
 	ApplyArms(client, ent, family, custom ? (w.viewModelGen[0] ? w.viewModelGen : w.viewModel) : stockVM, custom ? w.vmMode : "");
 
@@ -1288,6 +1364,8 @@ void ApplyArms(int client, int weapon, int family, const char[] customVM, const 
 
 	// overlay (and fallback): stock donor arms animate, role arms are bonemerged on top.
 	FormatEx(path, sizeof(path), "models/weapons/c_models/c_%s_arms.mdl", g_sClassArmsName[family]);
+	if (IsDecapWeapon(weapon) && IsModelPrecached(DECAP_ARMS))
+		strcopy(path, sizeof(path), DECAP_ARMS);
 	SetWeaponViewModel(weapon, path);
 }
 
@@ -1435,8 +1513,28 @@ bool GiveCustomWeapon(int client, int weaponIdx, int clip, int reserve, bool dro
 			SetEntProp(ent, Prop_Send, "m_iClip1", RoundToFloor(float(base) * mult + 0.001));
 	}
 	SetSlotReserve(client, w.slot, reserve >= 0 ? reserve : maxReserve);
+	EmptyAutoFireClip(client, w.slot, ent);
 	RequestFrame(Frame_PostGrant, GetClientUserId(client));
 	return true;
+}
+
+/**
+ * "auto fires full clip" (Beggar's Bazooka mechanic, the Quad Launcher):
+ * CTFWeaponBaseGun releases the loaded clip as soon as attack is not held, so
+ * a weapon handed over with its clip full fired the whole volley the moment it
+ * was picked up, spawned or resupplied. Such weapons start empty (as the
+ * Beggar's does), the clip going back to the reserve.
+ */
+void EmptyAutoFireClip(int client, int slot, int ent)
+{
+	if (!g_bTF2Attributes || ent <= MaxClients || TF2Attrib_HookValueFloat(0.0, "auto_fires_full_clip", ent) <= 0.0)
+		return;
+	int clip = GetEntProp(ent, Prop_Send, "m_iClip1");
+	if (clip <= 0)
+		return;
+	SetEntProp(ent, Prop_Send, "m_iClip1", 0);
+	SyncAmmoFromEntity(client, slot);
+	SetSlotReserve(client, slot, g_Inv[client][slot].reserve + clip);
 }
 
 /** Grant a stock item by definition index (Mercenary pickup of any class's weapon). */
@@ -1468,7 +1566,13 @@ bool GiveStockItemSnap(int client, int itemdef, int preferredClass, int clip, in
 	}
 
 	ReplaceSlot(client, slot, dropOld);
+	// A painted / australium / festive / killstreak / unusual item keeps its own
+	// model in first person (overlay arms + the weapon wearable carrying its
+	// look) instead of a stock_classes replacement viewmodel (the OF Merc
+	// shotgun for every c_shotgun pickup), which has no paint to show.
+	g_bKeepStockLook = SnapHasLook(snap, itemdef);
 	int ent = CreateAndEquip(client, classname, itemdef, family, STOCK_ITEM);
+	g_bKeepStockLook = false;
 	if (ent == -1)
 		return false;
 	int maxReserve = DefaultReserve(ent, family);
@@ -1486,6 +1590,7 @@ bool GiveStockItemSnap(int client, int itemdef, int preferredClass, int clip, in
 	if (clip >= 0)
 		SetEntProp(ent, Prop_Send, "m_iClip1", clip);
 	SetSlotReserve(client, slot, reserve >= 0 ? reserve : maxReserve);
+	EmptyAutoFireClip(client, slot, ent);
 	RequestFrame(Frame_PostGrant, GetClientUserId(client));
 	return true;
 }
@@ -1794,6 +1899,7 @@ public void Frame_Rematerialize(int userid)
 				if (clip > 0 && mult != 1.0)
 					SetEntProp(ent, Prop_Send, "m_iClip1", RoundToFloor(float(clip) * mult + 0.001));
 			}
+			EmptyAutoFireClip(client, s, ent);
 			continue;
 		}
 		int weaponIdx = g_Inv[client][s].weapon;
@@ -2475,6 +2581,7 @@ public Action Timer_PickupScan(Handle timer)
 		if (!IsClientInGame(client) || !IsPlayerAlive(client) || TF2CC_GetRole(client) == TF2CC_ROLE_NONE)
 			continue;
 		UpdateCritGlow(client);
+		UpdateLoserHide(client);
 		RechargeConsumables(client);
 		RestoreAttributes(client);
 		// SetWeaponVisible(true) (deploy, taunt end) clears EF_NODRAW: re-hide the donor.
@@ -3067,17 +3174,208 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 		// skin and attributes): a tf2cc pickup as well dropped it twice.
 		bool stockDropped = slot >= 0 && g_Inv[client][slot].weapon == STOCK_ITEM
 			&& FindFreshStockDrop(client, g_Inv[client][slot].itemdef) != -1;
-		if (slot >= 0 && !stockDropped && (always || !IsDefaultLoadoutWeapon(client, slot)))
+		if (slot >= 0 && !stockDropped && (always || g_cvDropDefault.BoolValue || !IsDefaultLoadoutWeapon(client, slot)))
 		{
 			SyncAmmoFromEntity(client, slot);
-			SpawnPickupFromSlot(client, slot, 60.0, true);
+			if (SpawnPickupFromSlot(client, slot, 60.0, true) == -1 && g_cvDropDefault.BoolValue && RoleCanPickup(client))
+				DropBestOther(client, slot);
 		}
+		else if (slot < 0 && g_cvDropDefault.BoolValue && RoleCanPickup(client))
+			DropBestOther(client, -1);
 	}
 	StopCritGlow(client);
 	ClearWorldTint(client);
 	RemoveOverlay(client);
 	ClearInventory(client); // next life starts from the role loadout
 	StashClear(client);
+}
+
+/**
+ * OF CTFPlayer::DropWeapon: an active weapon that cannot be dropped (Fists,
+ * Berserk: "DontDrop") is replaced by the highest-weighted other weapon.
+ * Here: primary, then secondary, then melee; tf2cc ground pickup only (the
+ * game drops nothing for a holstered stock item).
+ */
+void DropBestOther(int client, int skip)
+{
+	for (int s = SLOT_PRIMARY; s <= SLOT_MELEE; s++)
+	{
+		if (s == skip || g_Inv[client][s].weapon == WEAPON_NONE)
+			continue;
+		SyncAmmoFromEntity(client, s);
+		if (SpawnPickupFromSlot(client, s, 60.0, false) != -1)
+			return;
+	}
+}
+
+/* ========================================================================= */
+/* Humiliation                                                               */
+/* ========================================================================= */
+
+bool g_bLoserHidden[MAXPLAYERS + 1];
+
+/**
+ * After a round win the losers put their weapons away (loser-state stun: the
+ * game hides the stock weapon), but tf2cc's own wearables (custom world
+ * model, first-person arms and weapon overlays) kept drawing. Hidden with
+ * EF_NODRAW while the player's team lost the round; shown again when the
+ * state ends (a respawn rebuilds them anyway).
+ */
+void UpdateLoserHide(int client)
+{
+	bool loser = GameRules_GetRoundState() == RoundState_TeamWin
+		&& GameRules_GetProp("m_iWinningTeam") != GetClientTeam(client);
+	if (loser == g_bLoserHidden[client])
+		return;
+	g_bLoserHidden[client] = loser;
+	int refs[3];
+	refs[0] = g_iWorldWearable[client];
+	refs[1] = g_iArmsWearable[client];
+	refs[2] = g_iWeaponWearable[client];
+	for (int i = 0; i < 3; i++)
+	{
+		int e = EntRefToEntIndex(refs[i]);
+		if (e <= MaxClients)
+			continue;
+		int fx = GetEntProp(e, Prop_Send, "m_fEffects");
+		SetEntProp(e, Prop_Send, "m_fEffects", loser ? (fx | EF_NODRAW) : (fx & ~EF_NODRAW));
+	}
+}
+
+/* ========================================================================= */
+/* Mediguns held by role players                                             */
+/* ========================================================================= */
+
+/**
+ * Deploying works (CWeaponMedigun::SecondaryAttack has no class check: the
+ * charge is released and drains), but the effect is never applied:
+ * CTFPlayerShared::RecalculateChargeEffects asks the healer's
+ * CTFPlayer::GetChargeEffectBeingProvided, which returns
+ * MEDIGUN_CHARGE_INVALID unless he is a Medic. The Vaccinator applies its
+ * resist conditions from the medigun itself, so it already worked.
+ * While a role player's medigun is releasing, its conditions go on him and
+ * on his patient (g_MedigunEffects: invuln, crit boost, megaheal), refreshed
+ * every 0.1 s with a short duration so they end with the charge.
+ *
+ * The heal beam is client-side and only created for a Medic healer
+ * (CWeaponMedigun::UpdateEffects), so role players get it from an
+ * info_particle_system: control point 0 at the hand, 1 on the patient (50 u
+ * up, like the stock beam), team colour and the _invun variant while charged.
+ */
+public Action Timer_Medigun(Handle timer)
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		int target = -1;
+		bool release = false;
+		int medigun = -1;
+		if (IsClientInGame(client) && IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+		{
+			int w = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+			char cls[32];
+			if (w > MaxClients && GetEntityClassname(w, cls, sizeof(cls)) && StrEqual(cls, "tf_weapon_medigun"))
+			{
+				medigun = w;
+				release = GetEntProp(w, Prop_Send, "m_bChargeRelease") != 0;
+				if (GetEntProp(w, Prop_Send, "m_bHealing"))
+					target = GetEntPropEnt(w, Prop_Send, "m_hHealingTarget");
+			}
+		}
+		if (medigun > MaxClients && release && g_cvMedigunUber.BoolValue)
+			ApplyMedigunCharge(client, medigun, target);
+		UpdateHealBeam(client, g_cvHealBeam.BoolValue ? target : -1, release);
+	}
+	return Plugin_Continue;
+}
+
+void ApplyMedigunCharge(int client, int medigun, int target)
+{
+	int type = g_bTF2Attributes ? RoundToFloor(TF2Attrib_HookValueFloat(0.0, "set_charge_type", medigun)) : 0;
+	TFCond cond;
+	switch (type)
+	{
+		case 0: cond = TFCond_Ubercharged;      // MEDIGUN_CHARGE_INVULN
+		case 1: cond = TFCond_Kritzkrieged;     // MEDIGUN_CHARGE_CRITICALBOOST
+		case 2: cond = TFCond_MegaHeal;         // MEDIGUN_CHARGE_MEGAHEAL
+		default: return;                        // Vaccinator: the medigun applies its own resists
+	}
+	TF2_AddCondition(client, cond, 0.25, client);
+	if (target > 0 && target <= MaxClients && IsClientInGame(target) && IsPlayerAlive(target)
+		&& GetClientTeam(target) == GetClientTeam(client))
+		TF2_AddCondition(target, cond, 0.25, client);
+}
+
+void UpdateHealBeam(int client, int target, bool charged)
+{
+	char effect[40];
+	if (target > 0)
+	{
+		bool blue = GetClientTeam(client) == view_as<int>(TFTeam_Blue);
+		FormatEx(effect, sizeof(effect), "medicgun_beam_%s%s", blue ? "blue" : "red", charged ? "_invun" : "");
+	}
+	int fx = EntRefToEntIndex(g_iBeamFx[client]);
+	if (target <= 0 || !IsValidEntity(target))
+	{
+		RemoveHealBeam(client);
+		return;
+	}
+	if (fx > MaxClients && g_iBeamTarget[client] == target && StrEqual(effect, g_sBeamEffect[client]))
+		return;
+	RemoveHealBeam(client);
+
+	int cp = CreateEntityByName("info_particle_system");
+	fx = CreateEntityByName("info_particle_system");
+	if (cp == -1 || fx == -1)
+	{
+		if (cp != -1) RemoveEntity(cp);
+		if (fx != -1) RemoveEntity(fx);
+		return;
+	}
+	char name[32];
+	FormatEx(name, sizeof(name), "tf2cc_healbeam_cp%d", client);
+	float pos[3];
+	GetEntPropVector(target, Prop_Data, "m_vecAbsOrigin", pos);
+	pos[2] += target <= MaxClients ? 50.0 : 30.0;
+	DispatchKeyValue(cp, "targetname", name);
+	TeleportEntity(cp, pos, NULL_VECTOR, NULL_VECTOR);
+	DispatchSpawn(cp);
+	SetVariantString("!activator");
+	AcceptEntityInput(cp, "SetParent", target);
+
+	float hand[3];
+	GetClientEyePosition(client, hand);
+	TeleportEntity(fx, hand, NULL_VECTOR, NULL_VECTOR);
+	DispatchKeyValue(fx, "effect_name", effect);
+	DispatchKeyValue(fx, "cpoint1", name);
+	DispatchSpawn(fx);
+	SetVariantString("!activator");
+	AcceptEntityInput(fx, "SetParent", client);
+	SetVariantString(LookupEntityAttachment(client, "effect_hand_R") ? "effect_hand_R" : "eyes");
+	AcceptEntityInput(fx, "SetParentAttachment");
+	ActivateEntity(fx);
+	AcceptEntityInput(fx, "Start");
+
+	g_iBeamFx[client] = EntIndexToEntRef(fx);
+	g_iBeamCp[client] = EntIndexToEntRef(cp);
+	g_iBeamTarget[client] = target;
+	strcopy(g_sBeamEffect[client], sizeof(g_sBeamEffect[]), effect);
+}
+
+void RemoveHealBeam(int client)
+{
+	int fx = EntRefToEntIndex(g_iBeamFx[client]);
+	if (fx > MaxClients)
+	{
+		AcceptEntityInput(fx, "Stop");
+		RemoveEntity(fx);
+	}
+	int cp = EntRefToEntIndex(g_iBeamCp[client]);
+	if (cp > MaxClients)
+		RemoveEntity(cp);
+	g_iBeamFx[client] = INVALID_ENT_REFERENCE;
+	g_iBeamCp[client] = INVALID_ENT_REFERENCE;
+	g_iBeamTarget[client] = 0;
+	g_sBeamEffect[client][0] = '\0';
 }
 
 /* ========================================================================= */
@@ -3187,9 +3485,117 @@ public Action Cmd_Inventory(int client, int args)
 
 public void OnProfileChanged(ConVar cv, const char[] oldValue, const char[] newValue)
 {
+	ReloadWeaponTable();
+}
+
+/** tf2cc_civ_derringer / tf2cc_civ_cashwad: rebuild the table; a disabled item is taken away (default refilled). */
+public void OnCivItemChanged(ConVar cv, const char[] oldValue, const char[] newValue)
+{
+	if (cv.BoolValue)
+	{
+		ReloadWeaponTable();
+		return;
+	}
+	char id[32];
+	strcopy(id, sizeof(id), cv == g_cvCivDerringer ? "civ_backupplan" : "civ_cashwad");
+	int idx = FindWeaponById(id);
+	bool refill[MAXPLAYERS + 1][SLOT_COUNT];
+	if (idx != WEAPON_NONE)
+	{
+		for (int c = 1; c <= MaxClients; c++)
+		{
+			if (!IsClientInGame(c))
+				continue;
+			for (int s = 0; s < SLOT_COUNT; s++)
+			{
+				if (g_Inv[c][s].weapon == idx)
+				{
+					ReplaceSlot(c, s, false);
+					refill[c][s] = IsPlayerAlive(c);
+				}
+			}
+		}
+	}
+	ReloadWeaponTable();
+	for (int c = 1; c <= MaxClients; c++)
+	{
+		for (int s = 0; s < SLOT_COUNT; s++)
+		{
+			if (refill[c][s] && IsClientInGame(c) && IsPlayerAlive(c))
+			{
+				RefillDefault(c, s);
+				SwitchToBest(c);
+			}
+		}
+	}
+}
+
+/**
+ * Rebuild g_Weapons (profile or item switches) without breaking what players
+ * hold: indices shift when items are enabled or disabled, so inventory records
+ * and ground pickups are remapped by weapon id (gone ids become nothing).
+ */
+void ReloadWeaponTable()
+{
+	static char ids[MAXPLAYERS + 1][SLOT_COUNT][48];
+	WeaponDef w;
+	for (int c = 1; c <= MaxClients; c++)
+	{
+		for (int s = 0; s < SLOT_COUNT; s++)
+		{
+			ids[c][s][0] = '\0';
+			if (g_Inv[c][s].weapon >= 0 && g_Weapons != null && g_Inv[c][s].weapon < g_Weapons.Length)
+			{
+				g_Weapons.GetArray(g_Inv[c][s].weapon, w);
+				strcopy(ids[c][s], sizeof(ids[][]), w.id);
+			}
+		}
+	}
+	StringMap pickupIds = new StringMap();
+	StringMapSnapshot snap = g_Pickups.Snapshot();
+	char key[16];
+	PickupData d;
+	for (int i = 0; i < snap.Length; i++)
+	{
+		snap.GetKey(i, key, sizeof(key));
+		if (g_Pickups.GetArray(key, d, sizeof(d)) && d.weapon >= 0 && g_Weapons != null && d.weapon < g_Weapons.Length)
+		{
+			g_Weapons.GetArray(d.weapon, w);
+			pickupIds.SetString(key, w.id);
+		}
+	}
+
 	LoadWeapons();
 	PrecacheWeaponModels();
 	ValidateWeapons(0, false);
+
+	for (int c = 1; c <= MaxClients; c++)
+		for (int s = 0; s < SLOT_COUNT; s++)
+			if (ids[c][s][0])
+			{
+				int idx = FindWeaponById(ids[c][s]);
+				g_Inv[c][s].weapon = idx;   // WEAPON_NONE if the item is gone
+			}
+	char id[48];
+	for (int i = 0; i < snap.Length; i++)
+	{
+		snap.GetKey(i, key, sizeof(key));
+		if (pickupIds.GetString(key, id, sizeof(id)) && g_Pickups.GetArray(key, d, sizeof(d)))
+		{
+			d.weapon = FindWeaponById(id);
+			if (d.weapon == WEAPON_NONE)
+			{
+				g_Pickups.Remove(key);
+				int prop = EntRefToEntIndex(StringToInt(key));
+				if (prop > MaxClients)
+					RemoveEntity(prop);
+			}
+			else
+				g_Pickups.SetArray(key, d, sizeof(d));
+		}
+	}
+	delete snap;
+	delete pickupIds;
 }
 
 public Action Cmd_ListWeapons(int client, int args)
@@ -3732,6 +4138,40 @@ void ApplySnapshot(int weapon, const ItemSnapshot snap)
 	for (int i = 0; i < snap.count; i++)
 		TF2Attrib_SetByDefIndex(weapon, snap.defs[i], snap.values[i]);
 	TF2Attrib_ClearCache(weapon);
+}
+
+/** Attributes that change how the weapon model looks (item_schema attribute indices). */
+bool IsLookAttribute(int def)
+{
+	switch (def)
+	{
+		case 834, 725, 866, 867:   // paintkit_proto_def_index, set_item_texture_wear, custom_paintkit_seed_lo/hi
+			return true;
+		case 2027, 542:            // is_australium_item, item style override
+			return true;
+		case 2053, 2014, 134:      // is_festivized, killstreak_idleeffect (sheen), attach particle effect (unusual)
+			return true;
+		case 142, 261:             // set item tint RGB (paint), set item tint RGB 2
+			return true;
+	}
+	return false;
+}
+
+bool SnapHasLook(const ItemSnapshot snap, int itemdef)
+{
+	for (int i = 0; i < snap.count; i++)
+		if (IsLookAttribute(snap.defs[i]))
+			return true;
+	if (!g_bTF2Attributes)
+		return false;
+	// Gun Mettle / war-painted item definitions carry the paint kit statically.
+	int defs[16];
+	float vals[16];
+	int n = TF2Attrib_GetStaticAttribs(itemdef, defs, vals, sizeof(defs));
+	for (int i = 0; i < n && i < sizeof(defs); i++)
+		if (defs[i] == 834 || defs[i] == 2027)
+			return true;
+	return false;
 }
 
 /** Regenerate / MvM upgrades rebuild the runtime attribute list: put the item's look back when it is gone. */

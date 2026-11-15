@@ -27,6 +27,9 @@
 
 native bool TF2CC_GetWeaponSpecial(int weapon, char[] special, int maxlen, float &value);
 native bool TF2CC_ClientHasSpecial(int client, const char[] special);
+native bool TF2CC_PlayTaunt(int client, const char[] sequence, float duration);
+native bool TF2CC_IsTaunting(int client);
+native bool TF2CC_Speak(int client, const char[] concept, bool force = false);
 
 public Plugin myinfo =
 {
@@ -87,6 +90,11 @@ float g_flSawEnd[MAXPLAYERS + 1];
 float g_vecSawPos[MAXPLAYERS + 1][3];
 int g_iSawLauncher[MAXPLAYERS + 1];
 ArrayList g_ImpactList;   // entrefs of grenades that detonate on their first contact
+ArrayList g_QuadRockets;   // entrefs
+ConVar g_cvQuadHoming, g_cvQuadTurn;
+ArrayList g_ChinaList;   // { entref, spawn game time }
+ConVar g_cvChinaImpactTime, g_cvChinaEnemyTouch;
+bool g_bChinaFull[2049];
 
 /* OF tf_weapon_gatlinggun: Weapon_Gatling.WindUp/Fire/FireCrit/WindDown (94 dB). */
 #define GAT_SND_WINDUP ")weapons/chaingun_windup.wav"
@@ -129,6 +137,8 @@ float g_flCsChargeReady[MAXPLAYERS + 1];
 float g_flCsChargeStart[MAXPLAYERS + 1];
 bool g_bCsSpeedAttr[MAXPLAYERS + 1];     // charge speed attribute applied (ChargeSpeedStart)
 float g_flCsSpeedAttrOld[MAXPLAYERS + 1]; // its previous value, -1 = none
+Handle g_hCsMeter;
+ConVar g_cvCsMeter, g_cvCsMeterX, g_cvCsMeterY;
 #define CS_SPEED_ATTR "major move speed bonus"   // mult_player_movespeed, rarely used by anything else
 bool g_bCsDing[MAXPLAYERS + 1];
 bool g_bCsAttack2[MAXPLAYERS + 1];
@@ -138,6 +148,9 @@ public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max
 {
 	MarkNativeAsOptional("TF2CC_GetWeaponSpecial");
 	MarkNativeAsOptional("TF2CC_ClientHasSpecial");
+	MarkNativeAsOptional("TF2CC_PlayTaunt");
+	MarkNativeAsOptional("TF2CC_IsTaunting");
+	MarkNativeAsOptional("TF2CC_Speak");
 	RegPluginLibrary("tf2cc_specials");
 	return APLRes_Success;
 }
@@ -177,6 +190,11 @@ public void OnPluginStart()
 	g_cvBombMaxLive = CreateConVar("tf2cc_bomblets_max_live", "96", "Cap on simultaneously live bomblets server-wide (edict budget).", _, true, 0.0);
 	g_cvDynamiteImpact = CreateConVar("tf2cc_dynamite_impact", "1", "Dynamite bundles explode on their first contact (OF ExplodeOnImpact 1).", _, true, 0.0, true, 1.0);
 	g_ImpactList = new ArrayList();
+	g_ChinaList = new ArrayList(2);
+	g_cvQuadHoming = CreateConVar("tf2cc_quad_homing", "1", "Quad Launcher rockets home on the point the owner aims at while the Quad is out (OF m_bHoming / laser dot).", _, true, 0.0, true, 1.0);
+	g_cvQuadTurn = CreateConVar("tf2cc_quad_turn_rate", "6.0", "Quad rocket steering per second (fraction of the way to the aim direction).", _, true, 0.0);
+	g_cvChinaImpactTime = CreateConVar("tf2cc_chinalake_impact_time", "0.1", "China Lake: grenades explode on any impact within this many seconds of firing (OF ImpactBeforeTime 0.1).", _, true, 0.0);
+	g_cvChinaEnemyTouch = CreateConVar("tf2cc_chinalake_enemy_touch", "1", "China Lake: grenades still explode on touching an enemy after they bounced (OF AlwaysEnableTouch 1).", _, true, 0.0, true, 1.0);
 	// OF Saw Ballista (of_weapon_ripper.cpp): the blade slows to 5% while inside a target
 	// and deals its damage every 0.03 s think; approximated as damage over contact time.
 	g_cvSawDps = CreateConVar("tf2cc_sawblade_dps", "200", "Saw Ballista grind damage per second while the target stays at the hit point.", _, true, 0.0);
@@ -191,6 +209,11 @@ public void OnPluginStart()
 	g_cvCsRecharge = CreateConVar("tf2cc_chainsaw_charge_recharge", "8.0", "Seconds for the chainsaw charge to refill (OF ChargeRechargeRate 8).", _, true, 0.0);
 	g_cvCsSpeed = CreateConVar("tf2cc_chainsaw_charge_speed", "720", "Chainsaw charge speed (OF of_shield_charge_speed 720; a demoknight charge is tf_max_charge_speed 750).", _, true, 1.0);
 	AddNormalSoundHook(Hook_ChainsawSounds);
+	g_hCsMeter = CreateHudSynchronizer();
+	g_cvCsMeter = CreateConVar("tf2cc_chainsaw_charge_meter", "1", "Show the chainsaw charge meter (recharge / ready / charging) while the chainsaw is out.", _, true, 0.0, true, 1.0);
+	g_cvCsMeterX = CreateConVar("tf2cc_chainsaw_charge_meter_x", "0.73", "Chainsaw charge meter X (0-1, -1 = centre); same spot as the umbrella boost meter.");
+	g_cvCsMeterY = CreateConVar("tf2cc_chainsaw_charge_meter_y", "0.86", "Chainsaw charge meter Y (0-1).");
+	CreateTimer(0.1, Timer_ChainsawMeter, _, TIMER_REPEAT);
 	AddTempEntHook("TFExplosion", TE_TFExplosion);
 	AutoExecConfig(true, "tf2cc_specials");
 	CreateTimer(0.5, Timer_Infection, _, TIMER_REPEAT);
@@ -221,6 +244,7 @@ public void OnMapStart()
 	}
 	for (int i = 0; i < sizeof(CS_DEMO_SCREAM); i++)
 		PrecacheSound(CS_DEMO_SCREAM[i], true);
+	PrecacheSound("player/pl_scout_dodge_can_drink.wav", true);
 	PrecacheSound(HEAL_SOUND, true);
 	PrecacheSound(ZAP_SOUND, true);
 	PrecacheSound(HOOK_HIT_SOUND, true);
@@ -262,14 +286,16 @@ bool ActiveSpecial(int client, char[] special, int maxlen)
 /** Called per shot from TF2_CalcIsAttackCritical. */
 void BurstOnAttack(int client, int weapon, const char[] special, float v)
 {
-	if (!StrEqual(special, "burst"))
+	// "burst" = OF assault rifle (3); "burst4" = OF Quad Launcher (BurstSize 4).
+	if (StrContains(special, "burst") != 0)
 		return;
+	int size = (special[5] >= '2' && special[5] <= '9') ? view_as<int>(special[5]) - 48 : 3;
 	float now = GetGameTime();
 	if (now - g_flBurstLast[client] > 0.25 || EntRefToEntIndex(g_iBurstWeapon[client]) != weapon)
 		g_iBurstShots[client] = 0;
 	g_flBurstLast[client] = now;
 	g_iBurstWeapon[client] = EntIndexToEntRef(weapon);
-	if (++g_iBurstShots[client] >= 3)
+	if (++g_iBurstShots[client] >= size)
 	{
 		g_iBurstShots[client] = 0;
 		// PrimaryAttack sets m_flNextPrimaryAttack after this forward: push it next frame.
@@ -347,6 +373,8 @@ Action RunCmdSpecials(int client, int &buttons, int &impulse, int &weapon)
 		GatlingThink(client);
 	if (IsPlayerAlive(client) && ChainsawThink(client, buttons))
 		return Plugin_Changed;
+	if (IsPlayerAlive(client) && LunchboxThink(client, buttons))
+		return Plugin_Changed;
 	if (!(buttons & (IN_ATTACK | IN_ATTACK2)) || !IsPlayerAlive(client))
 		return Plugin_Continue;
 	char special[32];
@@ -371,6 +399,7 @@ Action RunCmdSpecials(int client, int &buttons, int &impulse, int &weapon)
 	g_flNextMed[client] = GetGameTime() + g_cvMedDelay.FloatValue;
 	if (buttons & IN_ATTACK)
 	{
+		MedkitSwingAnim(client, g_cvMedDelay.FloatValue);
 		int target = TraceFront(client, g_cvMedRange.FloatValue);
 		if (target > 0)
 		{
@@ -468,7 +497,7 @@ public void Event_DeathStopLoops(Event event, const char[] name, bool dontBroadc
 	if (client)
 	{
 		StopLoopSounds(client);
-		g_flCsChargeEnd[client] = 0.0;
+		ChainsawReset(client);
 		ChargeSpeedEnd(client);
 	}
 }
@@ -767,7 +796,196 @@ public void Event_Spawn(Event event, const char[] name, bool dontBroadcast)
 	{
 		RemoveBackpack(client);
 		g_bHoarder[client] = false;
+		ChainsawReset(client);
 	}
+}
+
+/* ========================================================================= */
+/* Lunchbox items for role players                                           */
+/*  CTFLunchBox::PrimaryAttack only calls CTFPlayer::Taunt(); the eat/drink  */
+/*  scene comes from the Heavy's/Scout's response rules and the bites from   */
+/*  TAUNTATK_HEAVY_EAT / TAUNTATK_SCOUT_DRINK, which CTFPlayer::Taunt sets    */
+/*  only for those classes: on class 10 primary fire did nothing. The same   */
+/*  effects run here on the tf2cc taunt (ApplyBiteEffects values):           */
+/*   food: a bite every 1 s from 1 s (4.3 s eat): 75 HP, Dalokohs/Fishcake   */
+/*   25 HP with +50 max health for 30 s, Buffalo Steak one bite: CritCola +  */
+/*   melee only for 16 s; then a 30 s recharge (effect bar, tf2cc_weapons    */
+/*   gives the charge back, tf2cc_hud shows it).                            */
+/*   drink: at 0.9 s Bonk (phase) or Crit-a-Cola for 9 s, switch back to the */
+/*   last weapon, 22 s recharge.                                           */
+/*  Alt-fire throw already works for any class (CTFLunchBox::SecondaryAttack).*/
+/* ========================================================================= */
+
+float g_flLunchEnd[MAXPLAYERS + 1];
+
+bool LunchboxThink(int client, int &buttons)
+{
+	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE)
+		return false;
+	int w = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	char cls[40];
+	if (w <= MaxClients || !GetEntityClassname(w, cls, sizeof(cls)) || StrContains(cls, "tf_weapon_lunchbox") != 0)
+		return false;
+	// Alt-fire throw (stock SecondaryAttack, works for any class) resets only the
+	// Heavy's item meter, which never refills on class 10: start the effect-bar
+	// recharge instead once the throw took the charge.
+	static bool held2[MAXPLAYERS + 1];
+	bool edge2 = (buttons & IN_ATTACK2) && !held2[client];
+	held2[client] = (buttons & IN_ATTACK2) != 0;
+	if (edge2 && HasEntProp(w, Prop_Send, "m_flEffectBarRegenTime"))
+	{
+		DataPack dp;
+		CreateDataTimer(0.1, Timer_LunchThrown, dp, TIMER_FLAG_NO_MAPCHANGE);
+		dp.WriteCell(GetClientUserId(client));
+		dp.WriteCell(EntIndexToEntRef(w));
+	}
+	if (!(buttons & IN_ATTACK))
+		return false;
+	buttons &= ~IN_ATTACK;   // the stock PrimaryAttack would only start a class-10 taunt that does nothing
+	float now = GetGameTime();
+	if (g_flLunchEnd[client] > now || !LibraryExists("tf2cc_taunts") || TF2CC_IsTaunting(client)
+		|| !(GetEntityFlags(client) & FL_ONGROUND))
+		return true;
+	int type = GetEntProp(w, Prop_Send, "m_iPrimaryAmmoType");
+	if (type <= 0 || GetEntProp(client, Prop_Send, "m_iAmmo", _, type) <= 0)
+		return true;
+	bool drink = StrEqual(cls, "tf_weapon_lunchbox_drink");
+	int mode = LibraryExists("tf2attributes") ? RoundToFloor(TF2Attrib_HookValueFloat(0.0, "set_weapon_mode", w)) : 0;
+
+	char key[32], spec[64], p[2][48];
+	strcopy(key, sizeof(key), drink ? "lunchbox_drink_taunt" : "lunchbox_eat_taunt");
+	if (!TF2CC_GetRoleString(TF2CC_GetRole(client), key, spec, sizeof(spec)) || !spec[0])
+		strcopy(spec, sizeof(spec), drink ? "taunt_coffee:1.2" : "taunt_coffee:4.3");
+	ExplodeString(spec, ":", p, sizeof(p), sizeof(p[]));
+	float dur = p[1][0] ? StringToFloat(p[1]) : (drink ? 1.2 : 4.3);
+	if (!TF2CC_PlayTaunt(client, p[0], dur))
+		return true;
+	g_flLunchEnd[client] = now + dur;
+
+	SetEntProp(client, Prop_Send, "m_iAmmo", GetEntProp(client, Prop_Send, "m_iAmmo", _, type) - 1, _, type);
+	if (HasEntProp(w, Prop_Send, "m_flEffectBarRegenTime"))
+		SetEntPropFloat(w, Prop_Send, "m_flEffectBarRegenTime", now + (drink ? 22.0 : 30.0));
+	if (HasEntProp(w, Prop_Send, "m_bBroken"))
+		SetEntProp(w, Prop_Send, "m_bBroken", 1);
+
+	int userid = GetClientUserId(client);
+	if (drink)
+	{
+		EmitSoundToAll("player/pl_scout_dodge_can_drink.wav", client, SNDCHAN_AUTO, SNDLEVEL_NORMAL);
+		DataPack dp;
+		CreateDataTimer(0.9, Timer_LunchDrink, dp, TIMER_FLAG_NO_MAPCHANGE);
+		dp.WriteCell(userid);
+		dp.WriteCell(mode);
+	}
+	else
+	{
+		// The Heavy's "om nom nom" (vo/SandwichEat09.mp3) through the voice module
+		// (persona concept "sandwicheat"), so its stock-VO filter lets it through.
+		if (LibraryExists("tf2cc_voice"))
+			TF2CC_Speak(client, "sandwicheat", true);
+		int bites = mode == 2 ? 1 : RoundToFloor(dur);   // LUNCHBOX_ADDS_MINICRITS (Buffalo Steak): one bite
+		for (int i = 1; i <= bites; i++)
+		{
+			DataPack dp;
+			CreateDataTimer(float(i), Timer_LunchBite, dp, TIMER_FLAG_NO_MAPCHANGE);
+			dp.WriteCell(userid);
+			dp.WriteCell(mode);
+			dp.WriteCell(i == 1);
+			dp.WriteFloat(LibraryExists("tf2attributes") ? TF2Attrib_HookValueFloat(1.0, "lunchbox_healing_scale", w) : 1.0);
+		}
+	}
+	return true;
+}
+
+public Action Timer_LunchThrown(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int client = GetClientOfUserId(dp.ReadCell());
+	int w = EntRefToEntIndex(dp.ReadCell());
+	if (!client || w <= MaxClients)
+		return Plugin_Stop;
+	int type = GetEntProp(w, Prop_Send, "m_iPrimaryAmmoType");
+	float now = GetGameTime();
+	if (type > 0 && GetEntProp(client, Prop_Send, "m_iAmmo", _, type) <= 0)
+		SetEntPropFloat(w, Prop_Send, "m_flEffectBarRegenTime", now + 30.0);   // the Heavy's meter restarts from 0 on a throw
+	return Plugin_Stop;
+}
+
+public Action Timer_LunchBite(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int client = GetClientOfUserId(dp.ReadCell());
+	int mode = dp.ReadCell();
+	bool first = dp.ReadCell();
+	float scale = dp.ReadFloat();
+	if (!client || !IsPlayerAlive(client) || !LibraryExists("tf2cc_taunts") || !TF2CC_IsTaunting(client))
+		return Plugin_Stop;
+	// The player resource has the attribute-adjusted maximum (role health);
+	// m_iMaxHealth is class 10's base value.
+	int res = GetPlayerResourceEntity();
+	int maxhp = res > 0 ? GetEntProp(res, Prop_Send, "m_iMaxHealth", _, client) : GetEntProp(client, Prop_Data, "m_iMaxHealth");
+	int hp = GetClientHealth(client);
+	switch (mode)
+	{
+		case 2:   // LUNCHBOX_ADDS_MINICRITS: Buffalo Steak Sandvich
+		{
+			TF2_AddCondition(client, TFCond_CritCola, 16.0);
+			TF2_AddCondition(client, TFCond_RestrictToMelee, 16.0);
+		}
+		case 1, 7:   // LUNCHBOX_CHOCOLATE_BAR, LUNCHBOX_FISHCAKE
+		{
+			if (first && LibraryExists("tf2attributes"))
+				TF2Attrib_AddCustomPlayerAttribute(client, "hidden maxhealth non buffed", 50.0, 30.0);
+			int cap = maxhp + (first ? 50 : 0);
+			int add = RoundToFloor(25.0 * scale);
+			if (hp < cap)
+				SetEntityHealth(client, hp + add > cap ? cap : hp + add);
+		}
+		default:
+		{
+			int add = RoundToFloor(75.0 * scale);   // lunchbox_healing_scale (Second Banana)
+			if (hp < maxhp)
+				SetEntityHealth(client, hp + add > maxhp ? maxhp : hp + add);
+		}
+	}
+	return Plugin_Stop;
+}
+
+public Action Timer_LunchDrink(Handle timer, DataPack dp)
+{
+	dp.Reset();
+	int client = GetClientOfUserId(dp.ReadCell());
+	int mode = dp.ReadCell();
+	if (!client || !IsPlayerAlive(client) || TF2_IsPlayerInCondition(client, TFCond_Dazed))
+		return Plugin_Stop;
+	if (mode == 2)
+		TF2_AddCondition(client, TFCond_CritCola, 9.0);   // Crit-a-Cola
+	else
+		TF2_AddCondition(client, TFCond_Bonked, 9.0);     // Bonk! Atomic Punch (tf_scout_energydrink_consume_rate: 8 s + 1)
+	if (IsFakeClient(client))
+		FakeClientCommand(client, "lastinv");
+	else
+		ClientCommand(client, "lastinv");   // CTFPlayer: SelectLastItem() after the drink
+	return Plugin_Stop;
+}
+
+/** Death / respawn / role change: no rev loop, ding or charge carries into the next life. */
+void ChainsawReset(int client)
+{
+	int held = EntRefToEntIndex(g_iCsWeapon[client]);
+	ChainsawStop(client, held);
+	if (IsClientInGame(client))
+	{
+		for (int i = 0; i < sizeof(CS_SOUNDS); i++)
+		{
+			StopSound(client, SNDCHAN_AUTO, CS_SOUNDS[i]);
+			StopSound(client, SNDCHAN_STATIC, CS_SOUNDS[i]);
+		}
+	}
+	g_bCsDing[client] = false;
+	g_flCsChargeEnd[client] = 0.0;
+	g_flCsChargeReady[client] = 0.0;
+	g_iCsState[client] = CS_IDLE;
 }
 
 void AttachBackpack(int client)
@@ -821,9 +1039,23 @@ bool IsCritBoosted(int client)
 
 float g_flNextInfectTick[MAXPLAYERS + 1];
 
+/**
+ * The medkit's donor (tf_weapon_laser_pointer, the Wrangler) never sends a fire
+ * activity, so the custom viewmodel's "hit" (ACT_ITEM1_VM_PRIMARYATTACK,
+ * 1.167 s) never played: play it from the server on each swing, fitted into
+ * the swing delay, as the chainsaw's rev sequences are.
+ */
+void MedkitSwingAnim(int client, float delay)
+{
+	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (weapon > MaxClients)
+		PlayViewSequence(client, weapon, "hit", delay > 0.0 ? FloatMax(1.0, 1.167 / delay) : 1.0, delay);
+}
+
 void MedkitPF2(int client)
 {
 	g_flNextMed[client] = GetGameTime() + g_cvPf2Delay.FloatValue;
+	MedkitSwingAnim(client, g_cvPf2Delay.FloatValue);
 	float eye[3], ang[3], dir[3], end[3];
 	GetClientEyePosition(client, eye);
 	GetClientEyeAngles(client, ang);
@@ -932,6 +1164,195 @@ public void Hook_BombParentSpawned(int entity)
 		RequestFrame(Frame_CheckBombParent, EntIndexToEntRef(entity));
 }
 
+/* ========================================================================= */
+/* China Lake (OF tf_weapon_grenadelauncher_mercenary, special "chinalake")  */
+/*  OF projectile_pipe_dm: ImpactBeforeTime 0.1 = any impact in the first     */
+/*  0.1 s detonates (CTFGrenadePipebombProjectile::ExplodeOnImpact), and      */
+/*  AlwaysEnableTouch = enemy contact detonates even after a bounce (TF2      */
+/*  pipes stop exploding on enemies once m_bTouched). Enemy contacts deal     */
+/*  full damage like a stock direct hit (both games keep the timer damage at  */
+/*  60%, TF_WEAPON_PIPEBOMB_TIMER_DMG_REDUCTION, otherwise; so does the early */
+/*  world impact).                                                            */
+/* ========================================================================= */
+
+
+/**
+ * CTFWeaponBaseGrenadeProj declares its own m_flDetonateTime (read by its
+ * DetonateThink) that shadows CBaseGrenade's; only the base one is in the
+ * datamap, so "m_flDetonateTime" through Prop_Data changed nothing (test
+ * server: datamap value 0.000 while the real fuse read 938.27 = spawn + fuse).
+ * In tf_weaponbase_grenadeproj.h the real one sits right before m_hEnemy,
+ * m_bInSolid and the networked m_bCritical: m_bCritical - 9 (float) and
+ * m_bCritical - 5 (m_hEnemy). Checked against the live value before writing;
+ * the datamap field is written too.
+ */
+int PipeFieldOffset(int pipe, int back)
+{
+	int crit = GetEntSendPropOffs(pipe, "m_bCritical", true);
+	return crit > 16 ? crit - back : -1;
+}
+
+void SetPipeDetonateTime(int pipe, float when)
+{
+	SetEntPropFloat(pipe, Prop_Data, "m_flDetonateTime", when);
+	int off = PipeFieldOffset(pipe, 9);
+	if (off < 0)
+		return;
+	float cur = GetEntDataFloat(pipe, off);
+	float now = GetGameTime();
+	// A live fuse is a game time (or 0 / FLT_MAX for stickies): anything else means the layout moved.
+	if (cur == 0.0 || cur > 1.0e30 || (cur > now - 600.0 && cur < now + 600.0))
+	{
+		SetEntDataFloat(pipe, off, when, false);
+		SetEntProp(pipe, Prop_Data, "m_nNextThinkTick", GetGameTickCount());
+	}
+}
+
+void SetPipeEnemy(int pipe, int enemy)
+{
+	int off = PipeFieldOffset(pipe, 5);
+	if (off < 0)
+		return;
+	int cur = GetEntData(pipe, off, 4);
+	if (cur == -1 || cur == 0 || EntRefToEntIndex(cur | (1 << 31)) > 0)   // invalid handle or a valid one
+		SetEntDataEnt2(pipe, off, enemy, false);
+}
+
+/* ========================================================================= */
+/* Quad Launcher (OF CTFSuperRocketLauncher): rockets home on the owner's    */
+/* laser dot (m_bHoming, on by default; the dot is the point the owner aims  */
+/* at). Server-side steering of the stock rocket, same speed.                */
+/* ========================================================================= */
+
+
+void QuadTrack(int rocket)
+{
+	if (g_QuadRockets == null)
+		g_QuadRockets = new ArrayList();
+	g_QuadRockets.Push(EntIndexToEntRef(rocket));
+}
+
+void QuadThink()
+{
+	if (g_QuadRockets == null || !g_cvQuadHoming.BoolValue)
+		return;
+	float dt = GetTickInterval();
+	for (int i = g_QuadRockets.Length - 1; i >= 0; i--)
+	{
+		int r = EntRefToEntIndex(g_QuadRockets.Get(i));
+		if (r <= MaxClients)
+		{
+			g_QuadRockets.Erase(i);
+			continue;
+		}
+		int owner = GetEntPropEnt(r, Prop_Send, "m_hOwnerEntity");
+		if (owner < 1 || owner > MaxClients || !IsClientInGame(owner) || !IsPlayerAlive(owner))
+			continue;
+		char special[32];
+		if (!ActiveSpecial(owner, special, sizeof(special)) || !StrEqual(special, "burst4"))
+			continue;   // OF: the dot (and homing) exists only while the Quad is out
+		float eye[3], ang[3], dir[3], end[3];
+		GetClientEyePosition(owner, eye);
+		GetClientEyeAngles(owner, ang);
+		GetAngleVectors(ang, dir, NULL_VECTOR, NULL_VECTOR);
+		ScaleVector(dir, 8192.0);
+		AddVectors(eye, dir, end);
+		Handle tr = TR_TraceRayFilterEx(eye, end, MASK_SHOT, RayType_EndPoint, Filter_NotSelf, owner);
+		TR_GetEndPosition(end, tr);
+		delete tr;
+		float pos[3], vel[3], want[3];
+		GetEntPropVector(r, Prop_Data, "m_vecAbsOrigin", pos);
+		GetEntPropVector(r, Prop_Data, "m_vecAbsVelocity", vel);
+		float speed = GetVectorLength(vel);
+		if (speed < 1.0)
+			continue;
+		MakeVectorFromPoints(pos, end, want);
+		if (GetVectorLength(want) < 16.0)
+			continue;
+		NormalizeVector(want, want);
+		NormalizeVector(vel, vel);
+		float t = g_cvQuadTurn.FloatValue * dt;   // fraction of the way per tick
+		if (t > 1.0) t = 1.0;
+		for (int k = 0; k < 3; k++)
+			vel[k] = vel[k] + (want[k] - vel[k]) * t;
+		NormalizeVector(vel, vel);
+		float newAng[3];
+		GetVectorAngles(vel, newAng);
+		ScaleVector(vel, speed);
+		TeleportEntity(r, NULL_VECTOR, newAng, vel);
+	}
+}
+
+void ChinaTrack(int entity)
+{
+	int row[2];
+	row[0] = EntIndexToEntRef(entity);
+	row[1] = view_as<int>(GetGameTime());
+	g_ChinaList.PushArray(row);
+	g_bChinaFull[entity] = false;
+	SDKHook(entity, SDKHook_Touch, Hook_ChinaTouch);
+}
+
+void ChinaDetonate(int pipe, int enemy)
+{
+	// OF restores the full damage only for an enemy contact (PipebombTouch); an
+	// early world impact (ExplodeOnImpact -> Detonate) keeps the timer damage.
+	if (enemy > 0 && !g_bChinaFull[pipe] && HasEntProp(pipe, Prop_Send, "m_flDamage"))
+	{
+		g_bChinaFull[pipe] = true;
+		SetEntPropFloat(pipe, Prop_Send, "m_flDamage", GetEntPropFloat(pipe, Prop_Send, "m_flDamage") / 0.6);
+	}
+	if (enemy > 0)
+		SetPipeEnemy(pipe, enemy);
+	SetPipeDetonateTime(pipe, GetGameTime());
+	SetEntProp(pipe, Prop_Data, "m_nNextThinkTick", GetGameTickCount());
+}
+
+public Action Hook_ChinaTouch(int pipe, int other)
+{
+	// Before the first bounce the stock touch handles enemies itself.
+	if (!g_cvChinaEnemyTouch.BoolValue || other < 1 || !GetEntProp(pipe, Prop_Send, "m_bTouched"))
+		return Plugin_Continue;
+	int team = GetEntProp(pipe, Prop_Send, "m_iTeamNum");
+	if (other <= MaxClients)
+	{
+		if (!IsClientInGame(other) || !IsPlayerAlive(other) || GetClientTeam(other) == team)
+			return Plugin_Continue;
+	}
+	else
+	{
+		char cls[32];
+		GetEntityClassname(other, cls, sizeof(cls));
+		if (StrContains(cls, "obj_") != 0 || GetEntProp(other, Prop_Send, "m_iTeamNum") == team)
+			return Plugin_Continue;
+	}
+	ChinaDetonate(pipe, other);
+	return Plugin_Continue;
+}
+
+void ChinaThink()
+{
+	float now = GetGameTime();
+	float window = g_cvChinaImpactTime.FloatValue + GetTickInterval();
+	int row[2];
+	for (int i = g_ChinaList.Length - 1; i >= 0; i--)
+	{
+		g_ChinaList.GetArray(i, row);
+		int ent = EntRefToEntIndex(row[0]);
+		float age = now - view_as<float>(row[1]);
+		if (ent <= MaxClients || age > window)
+		{
+			g_ChinaList.Erase(i);   // the touch hook stays for AlwaysEnableTouch
+			continue;
+		}
+		if (GetEntProp(ent, Prop_Send, "m_bTouched"))
+		{
+			ChinaDetonate(ent, -1);
+			g_ChinaList.Erase(i);
+		}
+	}
+}
+
 public void Frame_CheckBombParent(int ref)
 {
 	int entity = EntRefToEntIndex(ref);
@@ -943,6 +1364,22 @@ public void Frame_CheckBombParent(int ref)
 	float value;
 	if (launcher <= MaxClients || !TF2CC_GetWeaponSpecial(launcher, special, sizeof(special), value))
 		return;
+	if (StrEqual(special, "burst4"))
+	{
+		char rcls[64];
+		GetEntityClassname(entity, rcls, sizeof(rcls));
+		if (StrEqual(rcls, "tf_projectile_rocket"))
+			QuadTrack(entity);
+		return;
+	}
+	if (StrEqual(special, "chinalake"))
+	{
+		char pcls[64];
+		GetEntityClassname(entity, pcls, sizeof(pcls));
+		if (StrEqual(pcls, "tf_projectile_pipe"))
+			ChinaTrack(entity);
+		return;
+	}
 	int kind = BombletVariant(special);
 	if (!kind)
 		return;
@@ -1084,7 +1521,7 @@ void SpawnBomblet(int kind, int owner, int launcher, int team, bool crit, const 
 	}
 	SetEntPropFloat(bomb, Prop_Send, "m_flDamage", g_cvBombDamage[kind].FloatValue);
 	SetEntPropFloat(bomb, Prop_Send, "m_DmgRadius", g_cvBombRadius[kind].FloatValue);
-	SetEntPropFloat(bomb, Prop_Data, "m_flDetonateTime",
+	SetPipeDetonateTime(bomb,
 		GetGameTime() + g_cvBombFuse[kind].FloatValue + GetRandomFloat(0.0, g_cvBombFuseRandom[kind].FloatValue));
 	SetEntPropVector(bomb, Prop_Send, "m_vInitialVelocity", vel);
 	TeleportEntity(bomb, pos, NULL_VECTOR, vel);
@@ -1111,7 +1548,7 @@ public Action Hook_BombletTouch(int bomb, int other)
 		return Plugin_Handled;
 	if (g_cvBombImpact[g_iBomblet[bomb]].BoolValue)
 	{
-		SetEntPropFloat(bomb, Prop_Data, "m_flDetonateTime", GetGameTime());
+		SetPipeDetonateTime(bomb, GetGameTime());
 		SetEntProp(bomb, Prop_Data, "m_nNextThinkTick", GetGameTickCount());
 	}
 	return other > 0 ? Plugin_Handled : Plugin_Continue;   // world: let it bounce
@@ -1123,6 +1560,8 @@ public Action Hook_BombletTouch(int bomb, int other)
  */
 public void OnGameFrame()
 {
+	ChinaThink();
+	QuadThink();
 	for (int i = g_ImpactList.Length - 1; i >= 0; i--)
 	{
 		int ent = EntRefToEntIndex(g_ImpactList.Get(i));
@@ -1133,7 +1572,7 @@ public void OnGameFrame()
 		}
 		if (!GetEntProp(ent, Prop_Send, "m_bTouched"))
 			continue;
-		SetEntPropFloat(ent, Prop_Data, "m_flDetonateTime", GetGameTime());
+		SetPipeDetonateTime(ent, GetGameTime());
 		SetEntProp(ent, Prop_Data, "m_nNextThinkTick", GetGameTickCount());
 		g_ImpactList.Erase(i);
 	}
@@ -1241,7 +1680,7 @@ bool ChainsawThink(int client, int &buttons)
 	{
 		if (held > MaxClients || g_iCsState[client] != CS_IDLE)
 			ChainsawStop(client, held);
-		ChainsawChargeTick(client, now);
+		ChainsawChargeTick(client, now, false);
 		// Alt-fire edge state follows the button while the saw is away: it was
 		// only updated with the saw out, so dying or switching with alt-fire
 		// held left it set and the next press on the saw started no charge.
@@ -1412,13 +1851,66 @@ void ChainsawStop(int client, int held)
 	ChargeSpeedEnd(client);
 }
 
-/** Keeps the stock charge (its 1.5 s meter drain) going for the OF length; ding when refilled. */
-bool ChainsawChargeTick(int client, float now)
+/**
+ * Chainsaw charge meter. The shield-charge meter is one of the stock HUD's
+ * per-class item meters (CHudItemEffectMeter::CreateHudElementsForClass, Demoman
+ * only), so class 10 never draws m_flChargeMeter; HUD text in the same style
+ * and place as the umbrella boost meter (tf2cc_civilian), only with the saw out.
+ */
+public Action Timer_ChainsawMeter(Handle timer)
 {
+	if (!g_cvCsMeter.BoolValue)
+		return Plugin_Continue;
+	float now = GetGameTime();
+	float cd = g_cvCsRecharge.FloatValue;
+	char special[32], bar[16];
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client) || !IsPlayerAlive(client)
+			|| !ActiveSpecial(client, special, sizeof(special)) || !StrEqual(special, "chainsaw"))
+			continue;
+		bool charging = g_flCsChargeEnd[client] > now;
+		float left = g_flCsChargeReady[client] - now;
+		if (left > g_cvCsCharge.FloatValue + cd + 1.0)   // last-map stamp
+			left = 0.0;
+		int filled;
+		if (charging)
+			filled = RoundToCeil(10.0 * (g_flCsChargeEnd[client] - now) / FloatMax(g_cvCsCharge.FloatValue, 0.01));
+		else
+			filled = left <= 0.0 || cd <= 0.0 ? 10 : RoundToFloor(10.0 * (1.0 - left / cd));
+		if (filled > 10) filled = 10;
+		if (filled < 0) filled = 0;
+		for (int i = 0; i < 10; i++)
+			bar[i] = i < filled ? '|' : '.';
+		bar[10] = '\0';
+		bool blue = GetClientTeam(client) == view_as<int>(TFTeam_Blue);
+		int r = blue ? 120 : 255, g = blue ? 170 : 110, b = blue ? 255 : 100;
+		bool ready = !charging && left <= 0.0;
+		SetHudTextParams(g_cvCsMeterX.FloatValue, g_cvCsMeterY.FloatValue, 0.2, r, g, b, ready || charging ? 255 : 200, 0, 0.0, 0.0, 0.0);
+		if (charging)
+			ShowSyncHudText(client, g_hCsMeter, "Charge [%s] CHARGING", bar);
+		else if (ready)
+			ShowSyncHudText(client, g_hCsMeter, "Charge [%s] READY", bar);
+		else
+			ShowSyncHudText(client, g_hCsMeter, "Charge [%s] %.0fs", bar, left + 0.49);
+	}
+	return Plugin_Continue;
+}
+
+float FloatMax(float a, float b)
+{
+	return a > b ? a : b;
+}
+
+/** Keeps the stock charge (its 1.5 s meter drain) going for the OF length; ding when refilled. */
+bool ChainsawChargeTick(int client, float now, bool holding = true)
+{
+	// The "recharged" ding only for a living player holding the saw: it used
+	// to fire from the previous life's stamp after a respawn, or with the saw away.
 	if (g_bCsDing[client] && g_flCsChargeReady[client] > 0.0 && now >= g_flCsChargeReady[client])
 	{
 		g_bCsDing[client] = false;
-		if (!IsFakeClient(client))
+		if (holding && IsPlayerAlive(client) && !IsFakeClient(client))
 			EmitSoundToClient(client, CS_SND_DING);
 	}
 	if (g_flCsChargeEnd[client] <= now)
@@ -1589,7 +2081,7 @@ public void OnPluginEnd()
 
 public void TF2CC_OnRoleCleared(int client, int oldRole)
 {
-	g_flCsChargeEnd[client] = 0.0;
+	ChainsawReset(client);
 	ChargeSpeedEnd(client);
 }
 

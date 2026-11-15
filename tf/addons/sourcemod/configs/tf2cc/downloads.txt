@@ -610,6 +610,12 @@ models/weapons/customclasses/w_models/w_umbrella.dx90.vtx
 models/weapons/customclasses/w_models/w_umbrella.mdl
 models/weapons/customclasses/w_models/w_umbrella.phy
 models/weapons/customclasses/w_models/w_umbrella.vvd
+models/weapons/tf2cc_r3/c_demo_animations_item1.mdl
+models/weapons/tf2cc_r3/c_demo_arms_item1.dx80.vtx
+models/weapons/tf2cc_r3/c_demo_arms_item1.dx90.vtx
+models/weapons/tf2cc_r3/c_demo_arms_item1.mdl
+models/weapons/tf2cc_r3/c_demo_arms_item1.sw.vtx
+models/weapons/tf2cc_r3/c_demo_arms_item1.vvd
 models/weapons/tf2cc_r3/v_akimbo_pistols_mercenary__secondary.dx80.vtx
 models/weapons/tf2cc_r3/v_akimbo_pistols_mercenary__secondary.dx90.vtx
 models/weapons/tf2cc_r3/v_akimbo_pistols_mercenary__secondary.mdl

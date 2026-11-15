@@ -21,6 +21,9 @@ Config file: `cfg/sourcemod/tf2cc_civilian.cfg`
 | `tf2cc_civ_aura_particle` | `soldierbuff_%s_buffed` |  | Stock particle on aura-buffed players (%s = red/blue; TF2C civilianbuff_%s_buffed is a custom .pcf stock clients cannot load). Empty = none. |
 | `tf2cc_civ_bot_boost_rate` | `0.3` | >= 0 | Civilian bots: chance per second to boost the teammate they are looking at. |
 | `tf2cc_civ_capture_value` | `5` |  | Civilian control-point capture rate (TF2C 5). |
+| `tf2cc_civ_boost_meter` | `1` | 0 .. 1 | Show the umbrella boost cooldown meter while a role player holds the umbrella. |
+| `tf2cc_civ_boost_meter_x` | `0.73` |  | Umbrella boost meter X (0-1, -1 = centre); default sits under the tf2cc_hud item meters. |
+| `tf2cc_civ_boost_meter_y` | `0.86` |  | Umbrella boost meter Y (0-1). |
 
 ## TF2CC Core (`tf2cc_core.smx`)
 
@@ -119,6 +122,10 @@ Config file: `cfg/sourcemod/tf2cc_specials.cfg`
 | `tf2cc_medkit_pf2_infect_interval` | `2.0` |  | PF2 infection tick interval. |
 | `tf2cc_bomblets_max_live` | `96` | >= 0 | Cap on simultaneously live bomblets server-wide (edict budget). |
 | `tf2cc_dynamite_impact` | `1` | 0 .. 1 | Dynamite bundles explode on their first contact (OF ExplodeOnImpact 1). |
+| `tf2cc_quad_homing` | `1` | 0 .. 1 | Quad Launcher rockets home on the point the owner aims at while the Quad is out (OF m_bHoming / laser dot). |
+| `tf2cc_quad_turn_rate` | `6.0` | >= 0 | Quad rocket steering per second (fraction of the way to the aim direction). |
+| `tf2cc_chinalake_impact_time` | `0.1` | >= 0 | China Lake: grenades explode on any impact within this many seconds of firing (OF ImpactBeforeTime 0.1). |
+| `tf2cc_chinalake_enemy_touch` | `1` | 0 .. 1 | China Lake: grenades still explode on touching an enemy after they bounced (OF AlwaysEnableTouch 1). |
 | `tf2cc_sawblade_dps` | `200` | >= 0 | Saw Ballista grind damage per second while the target stays at the hit point. |
 | `tf2cc_sawblade_grind_time` | `0.6` | >= 0 | Saw Ballista grind duration after a hit. |
 | `tf2cc_sawblade_radius` | `60` | >= 0 | Distance from the hit point within which the target keeps being ground. |
@@ -129,6 +136,9 @@ Config file: `cfg/sourcemod/tf2cc_specials.cfg`
 | `tf2cc_chainsaw_charge_time` | `3.0` | >= 0 | Chainsaw alt-fire charge length (OF ChargeDuration 1.5, measured 2x in game). |
 | `tf2cc_chainsaw_charge_recharge` | `8.0` | >= 0 | Seconds for the chainsaw charge to refill (OF ChargeRechargeRate 8). |
 | `tf2cc_chainsaw_charge_speed` | `720` | >= 1 | Chainsaw charge speed (OF of_shield_charge_speed 720; a demoknight charge is tf_max_charge_speed 750). |
+| `tf2cc_chainsaw_charge_meter` | `1` | 0 .. 1 | Show the chainsaw charge meter (recharge / ready / charging) while the chainsaw is out. |
+| `tf2cc_chainsaw_charge_meter_x` | `0.73` |  | Chainsaw charge meter X (0-1, -1 = centre); same spot as the umbrella boost meter. |
+| `tf2cc_chainsaw_charge_meter_y` | `0.86` |  | Chainsaw charge meter Y (0-1). |
 
 ## TF2CC Taunts (experimental) (`tf2cc_taunts.smx`)
 
@@ -178,11 +188,16 @@ Config file: `cfg/sourcemod/tf2cc_weapons.cfg`
 | `tf2cc_ammopack_respawn` | `10.0` |  | Seconds before a map ammo pack consumed by a role player reappears. |
 | `tf2cc_pickup_lifetime` | `30.0` |  | Seconds a dropped Mercenary weapon stays on the ground. |
 | `tf2cc_pickup_auto_empty_slot` | `1` | 0 .. 1 | Touching a weapon whose slot is empty picks it up automatically (OF behaviour). |
-| `tf2cc_drop_on_death` | `1` | 0 .. 1 | Mercenary drops his active non-default weapon on death. |
+| `tf2cc_medigun_uber` | `1` | 0 .. 1 | Role players' deployed medigun charges (Medi Gun / Kritzkrieg / Quick-Fix) apply their effect; the game only applies them for Medics. |
+| `tf2cc_medigun_beam` | `1` | 0 .. 1 | Draw the medigun heal beam for role players (the client only draws it for Medics). |
+| `tf2cc_drop_on_death` | `1` | 0 .. 1 | Mercenary drops his active weapon on death. |
+| `tf2cc_drop_default_on_death` | `1` | 0 .. 1 | 1 = like OF (CTFPlayer::Event_Killed/DropWeapon) the default pistol/crowbar drop too, and an undroppable active weapon (Fists) drops the best other weapon instead; 0 = only non-default active weapons. |
 | `tf2cc_crit_glow` | `1` | 0 .. 1 | Show the stock crit/mini-crit weapon glow (critgun_weaponmodel_<team>) on custom weapons' world and view models while the holder is boosted. |
 | `tf2cc_stock_pickups` | `1` | 0 .. 1 | Mercenary may pick up weapons dropped by any class (tf_dropped_weapon). |
 | `tf2cc_viewmodel_mode` | `auto` |  | First-person viewmodels: auto (OF/TF2C v_model when generated, else role arms) \| custom \| family. Per-weapon "viewmodel_mode" overrides. |
 | `tf2cc_weapon_profile` | `source` |  | Weapon behaviour profile: source (Open Fortress / TF2 Classic accurate) \| marxvee (legacy MarxVee tuning). Per-weapon "profile" in weapons.cfg overrides. Applies from the next spawn. |
+| `tf2cc_civ_derringer` | `0` | 0 .. 1 | MarxVee Civilian derringer (civ_backupplan, "Backup Plan"): 1 = available (ammo packs, pickups, loadout), 0 = off and taken from anyone holding it. Overrides its weapons.cfg "enabled". |
+| `tf2cc_civ_cashwad` | `0` | 0 .. 1 | MarxVee Civilian cash wad (civ_cashwad): 1 = available, 0 = off and taken from anyone holding it. Overrides its weapons.cfg "enabled". |
 
 | Command | Access | What it does |
 |---|---|---|

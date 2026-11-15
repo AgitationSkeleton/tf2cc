@@ -67,12 +67,24 @@ float g_flCycleIn[MAXPLAYERS + 1];    // part of the sequence the clone shows (T
 float g_flCycleOut[MAXPLAYERS + 1];
 bool g_bFlexClone[MAXPLAYERS + 1];
 ArrayList g_aHidden[MAXPLAYERS + 1];   // wearables this taunt hid (restore only those)
+// Joined partner / group taunts (JoinHostedTaunt)
+bool g_bMimic[MAXPLAYERS + 1];        // group taunt (Conga, Kazotsky Kick, Mannrobics): loops, may move
+float g_flMimicSpeed[MAXPLAYERS + 1]; // forward speed (Conga walks by itself), 0 = input
+int g_iMimicHost[MAXPLAYERS + 1];
+bool g_bMimicAuto[MAXPLAYERS + 1];
+float g_flMimicLen[MAXPLAYERS + 1];
+float g_flHostLock[MAXPLAYERS + 1];
+float g_flMimicYaw[MAXPLAYERS + 1];  // body yaw, turned at taunt_turn_speed  // a stock host playing his success scene with a role partner  // loop length of the group-taunt sequence
+StringMap g_PartnerScenes;            // "def|class" -> "scene;scene;..." (initiator success scenes)
+StringMap g_PartnerSep;               // "def" -> forward separation
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
 	MarkNativeAsOptional("TF2CC_Speak");
 	MarkNativeAsOptional("TF2CC_GetWeaponId");
 	MarkNativeAsOptional("TF2CC_RefreshWeaponVisuals");
+	CreateNative("TF2CC_PlayTaunt", Native_PlayTaunt);
+	CreateNative("TF2CC_IsTaunting", Native_IsTaunting);
 	RegPluginLibrary("tf2cc_taunts");
 	return APLRes_Success;
 }
@@ -94,6 +106,7 @@ public void OnPluginStart()
 	static const char switchCmds[][] = { "use", "lastinv", "invnext", "invprev", "slot1", "slot2", "slot3", "slot4", "slot5", "slot6", "slot7", "slot8", "slot9", "slot10" };
 	for (int i = 0; i < sizeof(switchCmds); i++)
 		AddCommandListener(Listener_Switch, switchCmds[i]);
+	LoadPartnerTaunts();
 	RegAdminCmd("sm_tf2cc_tauntstate", Cmd_TauntState, ADMFLAG_GENERIC, "Show taunt state of role players.");
 	RegAdminCmd("sm_tf2cc_taunt", Cmd_Taunt, ADMFLAG_CHEATS, "sm_tf2cc_taunt <target> [sequence] - make a role player taunt (their normal pick, or a named sequence).");
 }
@@ -101,6 +114,30 @@ public void OnPluginStart()
 public Action Listener_Switch(int client, const char[] command, int argc)
 {
 	return client > 0 && client <= MaxClients && IsTaunting(client) ? Plugin_Handled : Plugin_Continue;
+}
+
+/**
+ * native bool TF2CC_PlayTaunt(int client, const char[] sequence, float duration)
+ * Other modules' taunt-style actions (lunchbox eating/drinking, joined partner
+ * taunts) through the normal clone taunt: camera, input lock, weapon hidden.
+ */
+public any Native_PlayTaunt(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	if (client < 1 || client > MaxClients || !IsClientInGame(client) || !IsPlayerAlive(client) || IsTaunting(client)
+		|| TF2CC_GetRole(client) == TF2CC_ROLE_NONE)
+		return false;
+	char seq[64];
+	GetNativeString(2, seq, sizeof(seq));
+	float duration = GetNativeCell(3);
+	StartTaunt(client, seq, duration > 0.5 ? duration : 1.0, "", 0.0);
+	return IsTaunting(client);
+}
+
+public any Native_IsTaunting(Handle plugin, int numParams)
+{
+	int client = GetNativeCell(1);
+	return client > 0 && client <= MaxClients && IsTaunting(client);
 }
 
 public Action Cmd_Taunt(int client, int args)
@@ -142,7 +179,19 @@ public void OnPluginEnd()
 }
 
 public void OnClientDisconnect(int client) { EndTaunt(client); }
-public void OnClientPutInServer(int client) { g_flNextTaunt[client] = 0.0; }
+public void OnClientPutInServer(int client) { g_flNextTaunt[client] = 0.0; g_flHostLock[client] = 0.0; }
+
+void ReleaseHost(int client)
+{
+	g_flHostLock[client] = 0.0;
+	if (IsClientInGame(client))
+	{
+		SetVariantInt(0);
+		AcceptEntityInput(client, "SetForcedTauntCam");
+		if (HasEntProp(client, Prop_Send, "m_hHighFivePartner"))
+			SetEntPropEnt(client, Prop_Send, "m_hHighFivePartner", -1);
+	}
+}
 public void TF2CC_OnRoleCleared(int client, int oldRole) { EndTaunt(client); }
 public void Event_Death(Event event, const char[] name, bool dontBroadcast)
 {
@@ -162,6 +211,15 @@ public Action Listener_Taunt(int client, const char[] command, int argc)
 	float now = GetGameTime();
 	if (g_flNextTaunt[client] - now > 30.0)
 		g_flNextTaunt[client] = 0.0;
+	// A second taunt press leaves a joined group taunt (like releasing it on a stock class).
+	if (IsTaunting(client) && g_bMimic[client])
+	{
+		EndTaunt(client);
+		return Plugin_Handled;
+	}
+	if (g_cvEnabled.BoolValue && IsPlayerAlive(client) && !IsTaunting(client) && (GetEntityFlags(client) & FL_ONGROUND)
+		&& JoinHostedTaunt(client))
+		return Plugin_Handled;
 	if (!g_cvEnabled.BoolValue || !IsPlayerAlive(client) || IsTaunting(client)
 		|| now < g_flNextTaunt[client] || !(GetEntityFlags(client) & FL_ONGROUND))
 		return Plugin_Handled;
@@ -172,6 +230,12 @@ public Action Listener_Taunt(int client, const char[] command, int argc)
 	{
 		if (g_cvDebug.BoolValue)
 			LogMessage("taunt %N: weapon pick '%s'", client, spec);
+		// Halloween: a "taunts" entry flagged halloween may replace the weapon
+		// taunt at random (as the Civilian's list already does), but never a
+		// taunt kill (roles.cfg "taunt_kills", e.g. the Merc's Bond pistol taunt).
+		char hspec[96];
+		if (!IsTauntKill(role, spec) && GetRandomInt(0, 1) == 1 && HalloweenTaunt(role, hspec, sizeof(hspec)))
+			strcopy(spec, sizeof(spec), hspec);
 		char p[5][64];
 		ExplodeString(spec, ":", p, sizeof(p), sizeof(p[]));
 		float dur = p[1][0] ? StringToFloat(p[1]) : 4.0;
@@ -355,8 +419,17 @@ public void OnMapStart()
 	}
 }
 
+public void Frame_EndMimic(int userid)
+{
+	int client = GetClientOfUserId(userid);
+	if (client && IsTaunting(client) && g_bMimic[client])
+		EndTaunt(client);
+}
+
 void EndTaunt(int client)
 {
+	g_bMimic[client] = false;
+	g_iMimicHost[client] = 0;
 	delete g_hEndTimer[client];
 	int prop = EntRefToEntIndex(g_iProp[client]);
 	g_iProp[client] = INVALID_ENT_REFERENCE;
@@ -392,13 +465,33 @@ void EndTaunt(int client)
 			SetEntityRenderMode(weapon, RENDER_NORMAL);
 	}
 	SetWearablesHidden(client, false);
+	// A taunt cut short (a group taunt left early, a stun) gives attacks back now,
+	// not at the planned end.
+	float now = GetGameTime();
+	if (GetEntPropFloat(client, Prop_Send, "m_flNextAttack") > now)
+		SetEntPropFloat(client, Prop_Send, "m_flNextAttack", now);
+	int aw = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (aw > MaxClients && HasEntProp(aw, Prop_Send, "m_flNextPrimaryAttack"))
+	{
+		if (GetEntPropFloat(aw, Prop_Send, "m_flNextPrimaryAttack") > now + 0.1)
+			SetEntPropFloat(aw, Prop_Send, "m_flNextPrimaryAttack", now + 0.1);
+		if (GetEntPropFloat(aw, Prop_Send, "m_flNextSecondaryAttack") > now + 0.1)
+			SetEntPropFloat(aw, Prop_Send, "m_flNextSecondaryAttack", now + 0.1);
+	}
+	if (g_flNextTaunt[client] > now + 1.0)
+		g_flNextTaunt[client] = now + 1.0;
 	if (IsPlayerAlive(client))
 		SetEntityMoveType(client, MOVETYPE_WALK);
 	SetVariantInt(0);
 	AcceptEntityInput(client, "SetForcedTauntCam");
 	// Back in first person the Merc/Civ arms overlay sometimes stayed hidden.
+	// Again once the client's taunt camera has swung back into first person.
 	if (IsPlayerAlive(client) && LibraryExists("tf2cc_weapons"))
-		CreateTimer(0.1, Timer_RefreshVisuals, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	{
+		static const float delays[] = { 0.1, 0.4, 0.8, 1.3, 2.0 };
+		for (int i = 0; i < sizeof(delays); i++)
+			CreateTimer(delays[i], Timer_RefreshVisuals, GetClientUserId(client), TIMER_FLAG_NO_MAPCHANGE);
+	}
 }
 
 public Action Timer_RefreshVisuals(Handle timer, int userid)
@@ -488,10 +581,24 @@ public void OnGameFrame()
 		// events are timed against it); only the shown frame is held inside the
 		// sequence's window, so the blend-in/out frames are never drawn.
 		float cycle = g_flTauntLen[i] > 0.0 ? (now - g_flTauntStart[i]) / g_flTauntLen[i] : 1.0;
-		if (cycle < g_flCycleIn[i])
-			cycle = g_flCycleIn[i];
-		if (cycle > g_flCycleOut[i])
-			cycle = g_flCycleOut[i];
+		if (g_bMimic[i])
+		{
+			cycle = g_flMimicLen[i] > 0.0 ? (now - g_flTauntStart[i]) / g_flMimicLen[i] : 0.0;
+			// Looping dance: wrap the cycle and turn with the player.
+			cycle -= RoundToFloor(cycle);
+			float eye[3];
+			GetClientEyeAngles(i, eye);
+			eye[0] = 0.0;
+			eye[2] = 0.0;
+			TeleportEntity(prop, NULL_VECTOR, eye, NULL_VECTOR);
+		}
+		else
+		{
+			if (cycle < g_flCycleIn[i])
+				cycle = g_flCycleIn[i];
+			if (cycle > g_flCycleOut[i])
+				cycle = g_flCycleOut[i];
+		}
 		SetEntPropFloat(prop, Prop_Send, "m_flCycle", cycle);
 		// m_flAnimTime is networked as an int: the Prop_Send write threw every
 		// frame and aborted the loop before any later taunting player.
@@ -503,8 +610,50 @@ public void OnGameFrame()
 /** No attacking, reloading or alt-fire while taunting. */
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
+	if (g_flHostLock[client] > 0.0)
+	{
+		if (GetGameTime() < g_flHostLock[client] && IsPlayerAlive(client))
+		{
+			// Stand still for the success scene, as TF_COND_TAUNTING would hold him.
+			buttons &= ~(IN_ATTACK | IN_ATTACK2 | IN_ATTACK3 | IN_JUMP | IN_DUCK
+				| IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
+			vel[0] = vel[1] = vel[2] = 0.0;
+			return Plugin_Changed;
+		}
+		ReleaseHost(client);
+	}
 	if (!IsTaunting(client))
 		return Plugin_Continue;
+	if (g_bMimic[client])
+	{
+		// Group taunts move like on a stock class: Conga walks forward by itself,
+		// Kazotsky Kick / Mannrobics take forward/back input; mouse turns.
+		buttons &= ~(IN_ATTACK | IN_ATTACK2 | IN_ATTACK3 | IN_RELOAD | IN_JUMP | IN_DUCK | IN_MOVELEFT | IN_MOVERIGHT);
+		float sp = g_flMimicSpeed[client];
+		if (g_bMimicAuto[client])
+			vel[0] = sp;
+		else if (vel[0] > sp)
+			vel[0] = sp;
+		else if (vel[0] < -sp)
+			vel[0] = -sp;
+		vel[1] = vel[2] = 0.0;
+		weapon = 0;
+		// items_game taunt_turn_speed 50 (deg/s) for all three.
+		float d = angles[1] - g_flMimicYaw[client];
+		while (d > 180.0) d -= 360.0;
+		while (d < -180.0) d += 360.0;
+		float maxd = 50.0 * GetTickInterval();
+		if (d > maxd) d = maxd;
+		else if (d < -maxd) d = -maxd;
+		g_flMimicYaw[client] += d;
+		angles[1] = g_flMimicYaw[client];
+		// The host left his group taunt: so do we (stock mimics keep going on their own,
+		// but a clone without the host's item has nothing to keep it).
+		int host = g_iMimicHost[client];
+		if (host > 0 && (!IsClientInGame(host) || !IsPlayerAlive(host) || !TF2_IsPlayerInCondition(host, TFCond_Taunting)))
+			RequestFrame(Frame_EndMimic, GetClientUserId(client));
+		return Plugin_Changed;
+	}
 	buttons &= ~(IN_ATTACK | IN_ATTACK2 | IN_ATTACK3 | IN_RELOAD | IN_JUMP | IN_DUCK
 		| IN_FORWARD | IN_BACK | IN_MOVELEFT | IN_MOVERIGHT);
 	vel[0] = vel[1] = vel[2] = 0.0;
@@ -626,6 +775,298 @@ void TauntWindow(int client, const char[] sequence, float &cin, float &cout)
 		}
 		return;
 	}
+}
+
+/* ========================================================================= */
+/* Joining partner and group taunts hosted by someone else                   */
+/*  Stock: CTFPlayer::Taunt -> FindPartnerTauntInitiator (a player within     */
+/*  tf_highfive_max_range who IsReadyToTauntWithPartner, i.e.                */
+/*  m_bIsReadyToHighFive, both facing each other, nothing in between) ->      */
+/*  AcceptTauntWithPartner (receiver moved to the host's taunt separation,   */
+/*  facing him; host plays an initiator success scene of his class) or, for  */
+/*  "taunt mimic" items (Conga, Kazotsky Kick, Mannrobics), MimicTaunt-      */
+/*  FromPartner (the joiner plays the same taunt). The scenes are per class, */
+/*  so class 10 never joined. Here the Mercenary/Civilian side plays the     */
+/*  matching Soldier sequence on the tf2cc clone (the role models include    */
+/*  the Soldier taunt animations), and the host's success scene comes from   */
+/*  items_game through VScript (CTFPlayer.StopTaunt / PlayScene). The role   */
+/*  never hosts; without a host nearby pressing taunt does the role's own.   */
+/*  Soldier VO never plays (the clone runs no scenes); the role's own line   */
+/*  does (roles.cfg persona concepts).                                       */
+/* ========================================================================= */
+
+#define PARTNER_DEFS_COUNT 8
+int g_iPartnerDefs[PARTNER_DEFS_COUNT] = { 167, 1106, 1107, 1110, 1111, 1118, 1157, 1162 };
+
+void LoadPartnerTaunts()
+{
+	delete g_PartnerScenes;
+	delete g_PartnerSep;
+	g_PartnerScenes = new StringMap();
+	g_PartnerSep = new StringMap();
+	KeyValues kv = new KeyValues("items_game");
+	if (!kv.ImportFromFile("scripts/items/items_game.txt") || !kv.JumpToKey("items"))
+	{
+		delete kv;
+		LogError("tf2cc_taunts: items_game.txt not readable; joining partner taunts is off");
+		return;
+	}
+	char def[16], cls[16], scene[PLATFORM_MAX_PATH], list[1024], key[32];
+	for (int d = 0; d < PARTNER_DEFS_COUNT; d++)
+	{
+		IntToString(g_iPartnerDefs[d], def, sizeof(def));
+		if (!kv.JumpToKey(def))
+			continue;
+		if (kv.JumpToKey("taunt"))
+		{
+			g_PartnerSep.SetValue(def, kv.GetFloat("taunt_separation_forward_distance", 0.0));
+			if (kv.JumpToKey("custom_partner_taunt_initiator_per_class") || kv.JumpToKey("custom_partner_taunt_per_class"))
+			{
+				if (kv.GotoFirstSubKey())
+				{
+					do
+					{
+						kv.GetSectionName(cls, sizeof(cls));
+						list[0] = '\0';
+						if (kv.GotoFirstSubKey(false))
+						{
+							do
+							{
+								kv.GetString(NULL_STRING, scene, sizeof(scene));
+								if (scene[0])
+								{
+									if (list[0])
+										StrCat(list, sizeof(list), ";");
+									StrCat(list, sizeof(list), scene);
+								}
+							}
+							while (kv.GotoNextKey(false));
+							kv.GoBack();
+						}
+						FormatEx(key, sizeof(key), "%s|%s", def, cls);
+						g_PartnerScenes.SetString(key, list);
+					}
+					while (kv.GotoNextKey());
+					kv.GoBack();
+				}
+				kv.GoBack();
+			}
+			kv.GoBack();
+		}
+		kv.GoBack();
+	}
+	delete kv;
+}
+
+/** Role sequence, length and own voice concept for a hosted taunt item; false = not joinable. */
+bool PartnerSequence(int def, int rpsResult, char[] seq, int maxlen, float &len, char[] concept, int clen, bool &mimic, float &speed, bool &autoMove)
+{
+	mimic = false;
+	speed = 0.0;
+	autoMove = false;
+	static const char rps[][] = { "rock", "paper", "scissors" };
+	switch (def)
+	{
+		case 167:  { strcopy(seq, maxlen, "taunt_highfiveSuccess"); len = 4.17; strcopy(concept, clen, "_cheers"); }
+		case 1106: { strcopy(seq, maxlen, "taunt_dosido_dance"); len = 8.3; strcopy(concept, clen, "_laughhappy"); }
+		case 1107: { strcopy(seq, maxlen, "taunt_flip_success_receiver"); len = 3.83; strcopy(concept, clen, "_flip_exert"); }
+		case 1110:
+		{
+			// rpsResult: 0..2 the role wins with rock/paper/scissors, 3..5 loses with them
+			FormatEx(seq, maxlen, "taunt_rps_%s_%s", rps[rpsResult % 3], rpsResult < 3 ? "win" : "lose");
+			len = 6.8;
+			strcopy(concept, clen, rpsResult < 3 ? "_cheers" : "_rps_lose");
+		}
+		case 1111: { strcopy(seq, maxlen, "taunt_headbutt_success"); len = 4.5; strcopy(concept, clen, "_battlecry"); }
+		case 1118: { strcopy(seq, maxlen, "taunt_conga"); len = 11.49; strcopy(concept, clen, "_cong_fun"); mimic = true; speed = 50.0; autoMove = true; }
+		case 1157: { strcopy(seq, maxlen, "taunt_russian"); len = 11.73; strcopy(concept, clen, "_laughhappy"); mimic = true; speed = 50.0; }
+		case 1162: { strcopy(seq, maxlen, "taunt_aerobic_A"); len = 7.5; strcopy(concept, clen, "_laughhappy"); mimic = true; speed = 50.0; }
+		default: return false;
+	}
+	return true;
+}
+
+int FindTauntHost(int client)
+{
+	ConVar allTeams = FindConVar("tf_allow_all_team_partner_taunt");
+	ConVar range = FindConVar("tf_highfive_max_range");
+	float maxr = range != null ? range.FloatValue : 150.0;
+	float eye[3], fwd[3], pos[3], hpos[3], to[3];
+	GetClientEyeAngles(client, eye);
+	eye[0] = 0.0;
+	GetAngleVectors(eye, fwd, NULL_VECTOR, NULL_VECTOR);
+	GetClientAbsOrigin(client, pos);
+	int best = -1;
+	float bestd = maxr * maxr;
+	for (int h = 1; h <= MaxClients; h++)
+	{
+		if (h == client || !IsClientInGame(h) || !IsPlayerAlive(h) || !TF2_IsPlayerInCondition(h, TFCond_Taunting))
+			continue;
+		if ((allTeams == null || !allTeams.BoolValue) && GetClientTeam(h) != GetClientTeam(client))
+			continue;
+		int def = HasEntProp(h, Prop_Send, "m_iTauntItemDefIndex") ? GetEntProp(h, Prop_Send, "m_iTauntItemDefIndex") : -1;
+		bool mimicDef = def == 1118 || def == 1157 || def == 1162;
+		if (!mimicDef && !GetEntProp(h, Prop_Send, "m_bIsReadyToHighFive"))
+			continue;
+		GetClientAbsOrigin(h, hpos);
+		SubtractVectors(hpos, pos, to);
+		to[2] = 0.0;
+		float d = GetVectorLength(to, true);
+		if (d > bestd)
+			continue;
+		NormalizeVector(to, to);
+		if (GetVectorDotProduct(to, fwd) < 0.6)
+			continue;   // we are not looking at that player
+		if (!mimicDef)
+		{
+			float hang[3], hfwd[3];
+			GetClientAbsAngles(h, hang);
+			hang[0] = 0.0;
+			GetAngleVectors(hang, hfwd, NULL_VECTOR, NULL_VECTOR);
+			if (GetVectorDotProduct(to, hfwd) > -0.6)
+				continue;   // the host is not facing us
+		}
+		best = h;
+		bestd = d;
+	}
+	return best;
+}
+
+bool JoinHostedTaunt(int client)
+{
+	if (g_PartnerScenes == null)
+		return false;
+	int host = FindTauntHost(client);
+	if (host < 1)
+		return false;
+	int def = GetEntProp(host, Prop_Send, "m_iTauntItemDefIndex");
+	int winner = GetRandomInt(0, 2), loser = ((winner + 2) % 3) + 3;
+	bool roleWins = GetRandomInt(0, 1) == 1;
+	int roleResult = roleWins ? winner : loser;
+	int hostResult = roleWins ? loser : winner;
+	char seq[64], concept[32];
+	float len, speed;
+	bool mimic, autoMove;
+	if (!PartnerSequence(def, roleResult, seq, sizeof(seq), len, concept, sizeof(concept), mimic, speed, autoMove))
+		return false;
+
+	if (!mimic)
+	{
+		// AcceptTauntWithPartner: in front of the host at his taunt separation, facing him.
+		float hpos[3], hang[3], fwd[3], dest[3];
+		GetClientAbsOrigin(host, hpos);
+		GetClientAbsAngles(host, hang);
+		hang[0] = 0.0;
+		hang[2] = 0.0;
+		GetAngleVectors(hang, fwd, NULL_VECTOR, NULL_VECTOR);
+		char dkey[16];
+		IntToString(def, dkey, sizeof(dkey));
+		float sep = 0.0;
+		g_PartnerSep.GetValue(dkey, sep);
+		if (sep <= 0.0)
+			sep = 70.0;
+		for (int k = 0; k < 3; k++)
+			dest[k] = hpos[k] + fwd[k] * sep;
+		dest[2] = hpos[2];
+		float face[3];
+		face[1] = hang[1] + 180.0;
+		TeleportEntity(client, dest, face, view_as<float>({ 0.0, 0.0, 0.0 }));
+		HostSuccessScene(host, def, client, hostResult, len);
+	}
+	g_bMimic[client] = mimic;   // before the clone's first frame
+	g_flMimicLen[client] = len;
+	StartTaunt(client, seq, mimic ? 600.0 : len, concept, mimic ? 0.5 : 0.3);
+	if (!IsTaunting(client))
+	{
+		g_bMimic[client] = false;
+		return false;
+	}
+	g_flMimicSpeed[client] = speed;
+	float eyes[3];
+	GetClientEyeAngles(client, eyes);
+	g_flMimicYaw[client] = eyes[1];
+	g_bMimicAuto[client] = autoMove;
+	g_iMimicHost[client] = mimic ? host : 0;
+	if (g_cvDebug.BoolValue)
+		LogMessage("taunt %N: joined %N's taunt %d as '%s'%s", client, host, def, seq, mimic ? " (group)" : "");
+	return true;
+}
+
+/** The host's initiator success scene for his class (SelectPartnerTaunt), through VScript. */
+void HostSuccessScene(int host, int def, int partner, int hostResult, float len)
+{
+	static const char classes[][] = { "", "scout", "sniper", "soldier", "demoman", "medic", "heavy", "pyro", "spy", "engineer" };
+	int cls = view_as<int>(TF2_GetPlayerClass(host));
+	if (cls < 1 || cls > 9)
+		return;
+	char key[32], list[1024], scenes[8][PLATFORM_MAX_PATH];
+	FormatEx(key, sizeof(key), "%d|%s", def, classes[cls]);
+	if (!g_PartnerScenes.GetString(key, list, sizeof(list)) || !list[0])
+		return;
+	int n = ExplodeString(list, ";", scenes, sizeof(scenes), sizeof(scenes[]));
+	int pick = def == 1110 ? hostResult : GetRandomInt(0, n - 1);
+	if (pick < 0 || pick >= n)
+		pick = 0;
+	char code[PLATFORM_MAX_PATH + 96];
+	FormatEx(code, sizeof(code), "self.StopTaunt(false); self.PlayScene(\"%s\", 0.0)", scenes[pick]);
+	SetVariantString(code);
+	AcceptEntityInput(host, "RunScriptCode");
+	SetEntProp(host, Prop_Send, "m_bIsReadyToHighFive", 0);
+	SetEntPropEnt(host, Prop_Send, "m_hHighFivePartner", partner);
+	// StopTaunt removed TF_COND_TAUNTING (its end time cannot be set from here):
+	// hold him in third person for the scene instead.
+	g_flHostLock[host] = GetGameTime() + len + 0.5;
+	SetEntPropFloat(host, Prop_Send, "m_flNextAttack", GetGameTime() + len);
+	SetVariantInt(1);
+	AcceptEntityInput(host, "SetForcedTauntCam");
+	if (g_cvDebug.BoolValue)
+		LogMessage("taunt: host %N plays %s", host, scenes[pick]);
+}
+
+/** roles.cfg "taunt_kills" "seq,seq": sequences whose taunt deals a kill (never replaced at random). */
+bool IsTauntKill(int role, const char[] spec)
+{
+	char seq[64], list[256];
+	strcopy(seq, sizeof(seq), spec);
+	int colon = FindCharInString(seq, ':');
+	if (colon >= 0)
+		seq[colon] = '\0';
+	if (StrEqual(seq, "taunt_bond", false))
+		return true;
+	if (!TF2CC_GetRoleString(role, "taunt_kills", list, sizeof(list)) || !list[0])
+		return false;
+	char parts[12][64];
+	int n = ExplodeString(list, ",", parts, sizeof(parts), sizeof(parts[]));
+	for (int i = 0; i < n; i++)
+	{
+		TrimString(parts[i]);
+		if (StrEqual(parts[i], seq, false))
+			return true;
+	}
+	return false;
+}
+
+/** A random halloween-flagged entry of the role's "taunts" list while Halloween is on. */
+bool HalloweenTaunt(int role, char[] out, int maxlen)
+{
+	if (!TF2_IsHolidayActive(TFHoliday_Halloween))
+		return false;
+	char list[512];
+	if (!TF2CC_GetRoleString(role, "taunts", list, sizeof(list)) || !list[0])
+		return false;
+	char entries[12][96], parts[5][64];
+	int n = ExplodeString(list, ",", entries, sizeof(entries), sizeof(entries[]));
+	int pick[12], count = 0;
+	for (int i = 0; i < n; i++)
+	{
+		if (ExplodeString(entries[i], ":", parts, sizeof(parts), sizeof(parts[])) >= 5 && StrEqual(parts[4], "halloween", false))
+			pick[count++] = i;
+	}
+	if (count == 0)
+		return false;
+	strcopy(out, maxlen, entries[pick[GetRandomInt(0, count - 1)]]);
+	TrimString(out);
+	return true;
 }
 
 /** "weapon_taunts" "id=seq:secs[:concept[:delay]];id=...;default=..." for the active weapon. */

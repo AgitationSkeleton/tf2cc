@@ -69,6 +69,8 @@ bool g_bAttack2Held[MAXPLAYERS + 1];
 bool g_bVoice;
 bool g_bTF2Attributes;
 Handle g_hHud;
+Handle g_hBoostMeter;
+ConVar g_cvBoostMeter, g_cvBoostMeterX, g_cvBoostMeterY;
 
 public APLRes AskPluginLoad2(Handle myself, bool late, char[] error, int err_max)
 {
@@ -92,6 +94,11 @@ public void OnPluginStart()
 	AutoExecConfig(true, "tf2cc_civilian");
 
 	g_hHud = CreateHudSynchronizer();
+	g_hBoostMeter = CreateHudSynchronizer();
+	g_cvBoostMeter = CreateConVar("tf2cc_civ_boost_meter", "1", "Show the umbrella boost cooldown meter while a role player holds the umbrella.", _, true, 0.0, true, 1.0);
+	g_cvBoostMeterX = CreateConVar("tf2cc_civ_boost_meter_x", "0.73", "Umbrella boost meter X (0-1, -1 = centre); default sits under the tf2cc_hud item meters.");
+	g_cvBoostMeterY = CreateConVar("tf2cc_civ_boost_meter_y", "0.86", "Umbrella boost meter Y (0-1).");
+	CreateTimer(0.1, Timer_BoostMeter, _, TIMER_REPEAT);
 	CreateTimer(1.0, Timer_AuraPulse, _, TIMER_REPEAT);
 	CreateTimer(0.25, Timer_Regen, _, TIMER_REPEAT);
 
@@ -506,6 +513,42 @@ public bool Filter_Boost(int entity, int contentsMask, int client)
 		&& TF2_GetPlayerClass(entity) != TFClass_Spy)
 		return false;
 	return true;
+}
+
+/**
+ * Umbrella boost cooldown meter. Class 10 has no item effect meters in the
+ * stock HUD (CHudItemEffectMeter::CreateHudElementsForClass builds them per
+ * stock class, and the umbrella's donor bat has none), so this is HUD text:
+ * a 10-step bar plus seconds, team-coloured, refreshed every 0.1 s and only
+ * while the umbrella is the active weapon (Civilian, or a Merc who picked it up).
+ */
+public Action Timer_BoostMeter(Handle timer)
+{
+	if (!g_cvBoostMeter.BoolValue)
+		return Plugin_Continue;
+	float now = GetGameTime();
+	float cd = g_cvBoostCooldown.FloatValue;
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client) || !HoldsUmbrella(client))
+			continue;
+		float left = g_flBoostReady[client] - now;
+		if (left > cd + 1.0)   // a stamp from the previous map (game time restarts)
+			left = 0.0;
+		bool blue = GetClientTeam(client) == view_as<int>(TFTeam_Blue);
+		int r = blue ? 120 : 255, g = blue ? 170 : 110, b = blue ? 255 : 100;
+		char bar[16];
+		int filled = left <= 0.0 || cd <= 0.0 ? 10 : RoundToFloor(10.0 * (1.0 - left / cd));
+		for (int i = 0; i < 10; i++)
+			bar[i] = i < filled ? '|' : '.';
+		bar[10] = '\0';
+		SetHudTextParams(g_cvBoostMeterX.FloatValue, g_cvBoostMeterY.FloatValue, 0.2, r, g, b, left <= 0.0 ? 255 : 200, 0, 0.0, 0.0, 0.0);
+		if (left <= 0.0)
+			ShowSyncHudText(client, g_hBoostMeter, "Boost [%s] READY", bar);
+		else
+			ShowSyncHudText(client, g_hBoostMeter, "Boost [%s] %.0fs", bar, left + 0.49);
+	}
+	return Plugin_Continue;
 }
 
 void ShowCooldown(int client, float remaining)
