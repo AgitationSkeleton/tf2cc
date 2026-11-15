@@ -10,7 +10,8 @@ Players don't need to install anything. Everything runs on the server, and the m
 sounds and textures download to players like any custom map content. Clients stay
 unmodified and VAC-secured.
 
-> **Status:** private pre-release. Not for redistribution yet. See [Licensing](#licensing).
+> **Status:** public playtest. It runs on live servers and is still being polished; please
+> report bugs through GitHub issues.
 
 ## What players get
 
@@ -160,8 +161,8 @@ See [CREDITS.md](CREDITS.md). In short:
 
 ## Licensing
 
-The licence for the tf2cc code is **not decided yet**. Until it is, all rights are
-reserved.
+The tf2cc code (plugins, configs, tools and documentation) is licensed under the
+**GNU General Public License v3.0** ([LICENSE](LICENSE)), like SourceMod itself.
 
 The bundled Classic Movement fork stays under its original **GPL-3.0** licence
 ([THIRD-PARTY/classicmovement-LICENSE](THIRD-PARTY/classicmovement-LICENSE)).

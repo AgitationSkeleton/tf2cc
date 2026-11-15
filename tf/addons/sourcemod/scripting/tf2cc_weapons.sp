@@ -114,6 +114,27 @@ enum struct AttrDef
 	float value;
 }
 
+/**
+ * The look of a picked-up stock item (TryPickupStock -> SnapshotItem): quality,
+ * level, its own attributes (war paint / Gun Mettle paint kit, wear and seed,
+ * australium, festivizer, killstreak sheen, unusual effect, paint, strange
+ * parts...) and its red/blu skin pair. Kept per slot, in ground pickups and in
+ * the stash, so the item looks the same after resupply, a drop or a swap.
+ */
+#define SNAP_MAX 32
+
+enum struct ItemSnapshot
+{
+	int quality;
+	int level;
+	int skinBase;    // red skin of the item's red/blu pair (australium 2), see HeldSkin
+	int count;
+	int defs[SNAP_MAX];
+	float values[SNAP_MAX];
+}
+
+ItemSnapshot g_NoSnap;   // quality/level -1, no attributes (OnPluginStart)
+
 ArrayList g_Weapons;
 ArrayList g_Attrs;
 
@@ -143,11 +164,14 @@ enum struct SlotRecord
 	int clip;
 	int reserve;
 	int maxReserve;
+	float charge;    // m_flChargeLevel of a medigun-type weapon when the game removed it (-1 = none)
 }
 
 SlotRecord g_Inv[MAXPLAYERS + 1][SLOT_COUNT];
+ItemSnapshot g_Snap[MAXPLAYERS + 1][SLOT_COUNT];   // stock item look per slot (GiveStockItemSnap)
 int g_iArmsWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 int g_iWeaponWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+int g_iWeaponWearableFor[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // weapon whose look it carries
 int g_iLastActive[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 bool g_bGranting[MAXPLAYERS + 1];
 float g_flNextPickupHint[MAXPLAYERS + 1];
@@ -163,6 +187,7 @@ enum struct PickupData
 	float expires;
 	int dropper;      // userid that dropped it (cannot re-take it before readyAt)
 	float readyAt;
+	ItemSnapshot snap;   // stock item look (paint kit, australium, ...)
 }
 
 StringMap g_Pickups;   // entref string -> PickupData
@@ -171,6 +196,7 @@ float g_flNextPackTouch[MAXPLAYERS + 1];
 float g_flDiedAt[MAXPLAYERS + 1];
 float g_vecDiedAt[MAXPLAYERS + 1][3];
 int g_iDiedDefs[MAXPLAYERS + 1][4];   // item defs of the custom weapons held at death
+float g_flStockDropAt[2049];          // game time each tf_dropped_weapon spawned (FindFreshStockDrop)
 ConVar g_cvStripForeign;
 ConVar g_cvBotSwapChance;
 KeyValues g_kvVariants;   // configs/tf2cc/model_variants.cfg
@@ -181,7 +207,13 @@ float g_flRematBurstStart;   // round-restart burst staggering (Event_Inventory)
 int g_iRematBurst;
 bool g_bEchoing;
 bool g_bUseHeld[MAXPLAYERS + 1];
-int g_iWorldWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };  // per-entity cooldown in case a pack ignores Disable
+int g_iWorldWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+// Crit-boost glow on the overlays (UpdateCritGlow): entity each glow was sent to.
+int g_iGlowWorld[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+int g_iGlowView[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+int g_iGlowWeapon[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+float g_flGlowResend[MAXPLAYERS + 1];
+ConVar g_cvCritGlow;  // per-entity cooldown in case a pack ignores Disable
 
 ConVar g_cvPackWeapons;
 ConVar g_cvPackRespawn;
@@ -282,6 +314,10 @@ public any Native_ClientHasSpecial(Handle plugin, int numParams)
 
 public void OnPluginStart()
 {
+	g_NoSnap.quality = -1;
+	g_NoSnap.level = -1;
+	g_NoSnap.skinBase = 0;
+	g_NoSnap.count = 0;
 	LoadTranslations("common.phrases");
 	AddCommandListener(Listener_Inspect, "+inspect");
 	g_cvOwnerSounds = CreateConVar("tf2cc_owner_weapon_sounds", "1", "1 = the shooter also hears a weapon's replacement sounds (sent with the same channel, level, volume and pitch as everyone else; the client's own stock sound still plays).", _, true, 0.0, true, 1.0);
@@ -294,6 +330,7 @@ public void OnPluginStart()
 	g_cvPickupLifetime = CreateConVar("tf2cc_pickup_lifetime", "30.0", "Seconds a dropped Mercenary weapon stays on the ground.");
 	g_cvAutoPickupEmpty = CreateConVar("tf2cc_pickup_auto_empty_slot", "1", "Touching a weapon whose slot is empty picks it up automatically (OF behaviour).", _, true, 0.0, true, 1.0);
 	g_cvDropOnDeath = CreateConVar("tf2cc_drop_on_death", "1", "Mercenary drops his active non-default weapon on death.", _, true, 0.0, true, 1.0);
+	g_cvCritGlow = CreateConVar("tf2cc_crit_glow", "1", "Show the stock crit/mini-crit weapon glow (critgun_weaponmodel_<team>) on custom weapons' world and view models while the holder is boosted.", _, true, 0.0, true, 1.0);
 	g_cvStockPickups = CreateConVar("tf2cc_stock_pickups", "1", "Mercenary may pick up weapons dropped by any class (tf_dropped_weapon).", _, true, 0.0, true, 1.0);
 	g_cvCustomVM = CreateConVar("tf2cc_viewmodel_mode", "auto", "First-person viewmodels: auto (OF/TF2C v_model when generated, else role arms) | custom | family. Per-weapon \"viewmodel_mode\" overrides.");
 	AutoExecConfig(true, "tf2cc_weapons");
@@ -385,8 +422,19 @@ public void OnMapStart()
 	PrecacheSound(g_sAmmoSound, true);
 	LoadModelVariants();
 	g_Pickups.Clear();
+	// Game time restarts at every map: timestamps from the last map would read
+	// as far in the future.
 	for (int i = 0; i < sizeof(g_flPackReady); i++)
+	{
 		g_flPackReady[i] = 0.0;
+		g_flStockDropAt[i] = 0.0;
+	}
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_flNextPackTouch[i] = 0.0;
+		g_flNextPickupHint[i] = 0.0;
+		g_flDiedAt[i] = 0.0;
+	}
 	PrecacheWeaponModels();
 }
 
@@ -523,10 +571,15 @@ public void OnClientPutInServer(int client)
 	ClearInventory(client);
 	g_iArmsWearable[client] = INVALID_ENT_REFERENCE;
 	g_iWeaponWearable[client] = INVALID_ENT_REFERENCE;
+	g_iGlowWorld[client] = INVALID_ENT_REFERENCE;
+	g_iGlowView[client] = INVALID_ENT_REFERENCE;
+	g_flGlowResend[client] = 0.0;
 	g_flNextPickupHint[client] = 0.0;
+	g_flNextPackTouch[client] = 0.0;
 	SDKHook(client, SDKHook_WeaponSwitchPost, Hook_WeaponSwitchPost);
 	SDKHook(client, SDKHook_WeaponEquipPost, Hook_WeaponEquipPost);
 	SDKHook(client, SDKHook_PostThinkPost, Hook_HideDonor);
+	SDKHook(client, SDKHook_PreThinkPost, Hook_KeepWeaponModel);
 }
 
 /**
@@ -534,6 +587,20 @@ public void OnClientPutInServer(int client)
  * model rides a wearable. Deploy (SetWeaponVisible) clears EF_NODRAW on each
  * switch; re-hiding only every 0.2 s let quick switches show the stock model.
  */
+/**
+ * The game puts the weapon back on the class hands in PreThink of the tick it
+ * was deployed (traced: model correct in WeaponSwitch pre and post, c_medic_arms
+ * from PreThinkPost through the end of that tick). Restoring it right there,
+ * before PostThink runs the weapon (ItemPostFrame, SendWeaponAnim), keeps the
+ * wrong model out of that tick's weapon logic and out of the snapshot; the
+ * OnPlayerRunCmd check alone fixed it one tick later.
+ */
+public void Hook_KeepWeaponModel(int client)
+{
+	if (IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+		KeepWeaponModel(client);
+}
+
 public void Hook_HideDonor(int client)
 {
 	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsPlayerAlive(client) || EntRefToEntIndex(g_iWorldWearable[client]) <= MaxClients)
@@ -658,6 +725,7 @@ void ClearInventory(int client)
 		g_Inv[client][s].clip = -1;
 		g_Inv[client][s].reserve = 0;
 		g_Inv[client][s].maxReserve = 0;
+		g_Snap[client][s] = g_NoSnap;
 	}
 	g_iLastActive[client] = INVALID_ENT_REFERENCE;
 }
@@ -1242,6 +1310,29 @@ void SetWeaponViewModel(int weapon, const char[] path)
 	SetEntityModel(weapon, path);
 }
 
+/**
+ * The game puts a deployed tf_weapon_handgun_scout_primary (Merc assault
+ * rifle, stock Shortstop pickups) back on the class-10 hands (c_medic_arms)
+ * one tick after the switch. The server then picked fire/reload sequences
+ * from c_medic_arms, found none and never played them, while the client
+ * predicted them on the custom viewmodel: every shot was corrected back to
+ * the draw/idle sequence (flicker, a repeating draw animation). Checked every
+ * usercmd for the active weapon; a model write only happens on drift.
+ */
+void KeepWeaponModel(int client)
+{
+	int weapon = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (weapon <= MaxClients || !HasEntProp(weapon, Prop_Send, "m_nCustomViewmodelModelIndex"))
+		return;
+	int idx = GetEntProp(weapon, Prop_Send, "m_nCustomViewmodelModelIndex");
+	if (idx <= 0 || GetEntProp(weapon, Prop_Send, "m_nModelIndex") == idx || SlotOfEntity(client, weapon) < 0)
+		return;
+	char path[PLATFORM_MAX_PATH];
+	ModelIndexToString(idx, path, sizeof(path));
+	if (path[0])
+		SetEntityModel(weapon, path);
+}
+
 /* ========================================================================= */
 /* Loadout & inventory                                                       */
 /* ========================================================================= */
@@ -1351,6 +1442,12 @@ bool GiveCustomWeapon(int client, int weaponIdx, int clip, int reserve, bool dro
 /** Grant a stock item by definition index (Mercenary pickup of any class's weapon). */
 bool GiveStockItem(int client, int itemdef, int preferredClass, int clip, int reserve, bool dropOld)
 {
+	return GiveStockItemSnap(client, itemdef, preferredClass, clip, reserve, dropOld, g_NoSnap);
+}
+
+/** GiveStockItem with the item's look (paint kit, australium, ...): stored per slot and applied. */
+bool GiveStockItemSnap(int client, int itemdef, int preferredClass, int clip, int reserve, bool dropOld, const ItemSnapshot snap)
+{
 	SchemaItem it;
 	if (!ResolveSchemaItem(itemdef, it))
 		return false;
@@ -1384,6 +1481,8 @@ bool GiveStockItem(int client, int itemdef, int preferredClass, int clip, int re
 		reserve = maxReserve;
 	}
 	StoreSlot(client, slot, STOCK_ITEM, itemdef, ent, maxReserve);
+	g_Snap[client][slot] = snap;
+	ApplySnapshot(ent, snap);
 	if (clip >= 0)
 		SetEntProp(ent, Prop_Send, "m_iClip1", clip);
 	SetSlotReserve(client, slot, reserve >= 0 ? reserve : maxReserve);
@@ -1440,6 +1539,43 @@ void StoreSlot(int client, int slot, int weaponIdx, int itemdef, int ent, int ma
 	g_Inv[client][slot].entRef = EntIndexToEntRef(ent);
 	g_Inv[client][slot].maxReserve = maxReserve;
 	g_Inv[client][slot].clip = -1;
+	g_Snap[client][slot] = g_NoSnap;
+	g_Inv[client][slot].charge = -1.0;
+}
+
+/**
+ * Resupply / MvM upgrade: CTFPlayer::Regenerate -> ValidateWeapons removes the
+ * class-10 player's stock pickups before post_inventory_application, and
+ * Frame_Rematerialize re-gives a fresh entity. Stock TF2 keeps the ÜberCharge
+ * through resupply, so remember a medigun's charge while the removed entity is
+ * still readable and put it back on the replacement.
+ */
+public void OnEntityDestroyed(int entity)
+{
+	if (entity <= MaxClients || entity >= 2048 || !IsValidEntity(entity) || !HasEntProp(entity, Prop_Send, "m_flChargeLevel"))
+		return;
+	// The game detaches the weapon (owner cleared) before removing it: find the
+	// slot record by entity reference instead of by owner.
+	int ref = EntIndexToEntRef(entity);
+	for (int c = 1; c <= MaxClients; c++)
+	{
+		for (int s = 0; s < SLOT_COUNT; s++)
+		{
+			if (g_Inv[c][s].entRef == ref)
+			{
+				g_Inv[c][s].charge = GetEntPropFloat(entity, Prop_Send, "m_flChargeLevel");
+				return;
+			}
+		}
+	}
+}
+
+/** Put a remembered medigun charge back on the slot's current entity. */
+void RestoreCharge(int client, int slot, float charge)
+{
+	int ent = EntRefToEntIndex(g_Inv[client][slot].entRef);
+	if (charge > 0.0 && ent > MaxClients && HasEntProp(ent, Prop_Send, "m_flChargeLevel"))
+		SetEntPropFloat(ent, Prop_Send, "m_flChargeLevel", charge);
 }
 
 /** Remove the occupant of a slot through the game's own RemovePlayerItem. */
@@ -1587,6 +1723,7 @@ public void Hook_WeaponSwitchPost(int client, int weapon)
 			if (path[0])
 				SetEntityModel(vm, path);
 		}
+		KeepWeaponModel(client);
 	}
 	UpdateOverlay(client);
 }
@@ -1646,6 +1783,8 @@ public void Frame_Rematerialize(int userid)
 		if (ent > MaxClients && GetEntPropEnt(ent, Prop_Send, "m_hOwnerEntity") == client)
 		{
 			SetSlotReserve(client, s, g_Inv[client][s].maxReserve); // resupply = full
+			if (g_Inv[client][s].weapon == STOCK_ITEM)
+				ReapplySnapshot(ent, g_Snap[client][s]);
 			// Regenerate refilled the clip to the max WITHOUT our clip attributes
 			// (they were wiped with the runtime attribute list): scale it back up.
 			if (g_Inv[client][s].weapon >= 0 && ReapplyCustomAttributes(ent, g_Inv[client][s].weapon))
@@ -1659,11 +1798,21 @@ public void Frame_Rematerialize(int userid)
 		}
 		int weaponIdx = g_Inv[client][s].weapon;
 		int itemdef = g_Inv[client][s].itemdef;
+		// Same tick as ValidateWeapons: the removed entity is still readable.
+		float charge = g_Inv[client][s].charge;
+		if (ent > MaxClients && HasEntProp(ent, Prop_Send, "m_flChargeLevel"))
+			charge = GetEntPropFloat(ent, Prop_Send, "m_flChargeLevel");
 		g_Inv[client][s].entRef = INVALID_ENT_REFERENCE;
 		if (weaponIdx >= 0)
 			GiveCustomWeapon(client, weaponIdx, -1, -1, false);
 		else if (weaponIdx == STOCK_ITEM)
-			GiveStockItem(client, itemdef, 0, -1, -1, false);
+		{
+			// Fresh entity (ValidateWeapons removed the old one): same look again.
+			ItemSnapshot keep;
+			keep = g_Snap[client][s];
+			GiveStockItemSnap(client, itemdef, 0, -1, -1, false, keep);
+		}
+		RestoreCharge(client, s, charge);
 		any = true;
 	}
 	// Resupply restores the default loadout (DM pistol, crowbar) where a slot is
@@ -1794,12 +1943,16 @@ void UpdateOverlay(int client)
 	if (active > MaxClients)
 	{
 		int wIdx = GetEntProp(active, Prop_Send, "m_iWorldModelIndex");
-		if (wpnEnt <= MaxClients || GetEntProp(wpnEnt, Prop_Send, "m_nModelIndex") != wIdx)
+		// Rebuilt per weapon, not only per model: the wearable carries the held
+		// item's look (CopyItemLook), and two items can share a world model.
+		if (wpnEnt <= MaxClients || GetEntProp(wpnEnt, Prop_Send, "m_nModelIndex") != wIdx
+			|| g_iWeaponWearableFor[client] != EntIndexToEntRef(active))
 		{
 			if (wpnEnt > MaxClients)
 				RemoveEntity(wpnEnt);
-			wpnEnt = CreateVMWearable(client, vm, wIdx);
+			wpnEnt = CreateWearable(client, "tf_wearable_vm", wIdx, vm, active);
 			g_iWeaponWearable[client] = wpnEnt > 0 ? EntIndexToEntRef(wpnEnt) : INVALID_ENT_REFERENCE;
+			g_iWeaponWearableFor[client] = EntIndexToEntRef(active);
 		}
 		if (wpnEnt > MaxClients)
 			SetEntPropEnt(wpnEnt, Prop_Send, "m_hWeaponAssociatedWith", active);
@@ -1827,11 +1980,13 @@ int CreateVMWearable(int client, int vm, int modelIndex)
  * m_bBeingRepurposedForTaunt, which hides associated wearables
  * (CTFWearable::ShouldDraw); tf2cc adds/removes them on weapon switch.
  */
-int CreateWearable(int client, const char[] classname, int modelIndex, int parent)
+int CreateWearable(int client, const char[] classname, int modelIndex, int parent, int itemFrom = -1)
 {
 	int ent = CreateEntityByName(classname);
 	if (ent == -1)
 		return -1;
+	if (itemFrom > MaxClients)
+		CopyItemIdentity(itemFrom, ent);
 	float pos[3], ang[3];
 	GetEntPropVector(client, Prop_Send, "m_vecOrigin", pos);
 	GetEntPropVector(client, Prop_Send, "m_angRotation", ang);
@@ -1842,12 +1997,66 @@ int CreateWearable(int client, const char[] classname, int modelIndex, int paren
 	SetEntProp(ent, Prop_Send, "m_fEffects", EF_BONEMERGE | EF_BONEMERGE_FASTCULL);
 	DispatchSpawn(ent);
 	SetEntProp(ent, Prop_Send, "m_nModelIndex", modelIndex);   // after spawn (CEconItemView resets it)
+	if (itemFrom > MaxClients)
+		CopyItemAttributes(itemFrom, ent);
 	// Team skin explicitly: a bonemerged wearable would otherwise follow skins
 	// such as australium (index 2+) that the arms model does not have -> red.
 	SetEntProp(ent, Prop_Send, "m_nSkin", GetClientTeam(client) == view_as<int>(TFTeam_Blue) ? 1 : 0);
 	SetVariantString("!activator");
 	AcceptEntityInput(ent, "SetParent", parent);
 	return ent;
+}
+
+/**
+ * First person, overlay arms: the held weapon is drawn by a bonemerged
+ * tf_wearable_vm, not by the weapon. An item-less wearable drew every stock
+ * pickup plain: the client takes a war paint / Gun Mettle paint kit, its wear
+ * and seed, the festivizer, killstreak sheen and unusual effect from the
+ * rendered entity's own CEconItemView (GetEconItemViewFromProxyEntity,
+ * c_tf_player.cpp), and the material override from its item definition.
+ * Same approach as the Randomizer plugin (it copies m_Item with
+ * CEconItemView::operator=); here only through netprops and TF2Attributes.
+ * The wearable is never equipped, so the copied attributes provide nothing
+ * to the player (no double damage bonus etc.); the skin comes from the
+ * associated weapon (CTFWearable::GetSkin).
+ */
+void CopyItemIdentity(int from, int to)
+{
+	if (!HasEntProp(from, Prop_Send, "m_iItemDefinitionIndex") || !HasEntProp(to, Prop_Send, "m_iItemDefinitionIndex"))
+		return;
+	SetEntProp(to, Prop_Send, "m_iItemDefinitionIndex", GetEntProp(from, Prop_Send, "m_iItemDefinitionIndex"));
+	SetEntProp(to, Prop_Send, "m_iEntityQuality", GetEntProp(from, Prop_Send, "m_iEntityQuality"));
+	SetEntProp(to, Prop_Send, "m_iEntityLevel", GetEntProp(from, Prop_Send, "m_iEntityLevel"));
+	SetEntProp(to, Prop_Send, "m_iAccountID", GetEntProp(from, Prop_Send, "m_iAccountID"));
+	SetEntProp(to, Prop_Send, "m_bInitialized", 1);
+}
+
+/** Runtime attributes of the weapon, plus the SOC ones of a player's own item (runtime values win). */
+void CopyItemAttributes(int from, int to)
+{
+	if (!g_bTF2Attributes || !HasEntProp(to, Prop_Send, "m_AttributeList"))
+		return;
+	int defs[SNAP_MAX], soc[SNAP_MAX];
+	float vals[SNAP_MAX];
+	int n = TF2Attrib_ListDefIndices(from, defs, SNAP_MAX);
+	if (n > SNAP_MAX)
+		n = SNAP_MAX;
+	int m = TF2Attrib_GetSOCAttribs(from, soc, vals, SNAP_MAX);
+	for (int i = 0; i < m && i < SNAP_MAX; i++)
+	{
+		bool runtime = false;
+		for (int j = 0; j < n && !runtime; j++)
+			runtime = defs[j] == soc[i];
+		if (!runtime)
+			TF2Attrib_SetByDefIndex(to, soc[i], vals[i]);
+	}
+	for (int i = 0; i < n; i++)
+	{
+		Address a = TF2Attrib_GetByDefIndex(from, defs[i]);
+		if (a != Address_Null)
+			TF2Attrib_SetByDefIndex(to, defs[i], TF2Attrib_GetValue(a));
+	}
+	TF2Attrib_ClearCache(to);
 }
 
 /**
@@ -1922,6 +2131,214 @@ void RemoveOverlay(int client)
 }
 
 /* ========================================================================= */
+/* Crit-boost glow on the overlays                                           */
+/* ========================================================================= */
+
+/**
+ * The client draws the crit/mini-crit weapon glow (C_TFPlayer crit boost
+ * effect: critgun_weaponmodel_<team>, emitted over the weapon model) on the
+ * donor weapon, which custom weapons keep hidden, and on the first-person
+ * attachment model that the custom viewmodel replaces. So custom weapons
+ * showed no glow at all. While the holder is boosted, the same system is
+ * attached (TFParticleEffect, PATTACH_ABSORIGIN_FOLLOW) to the third-person
+ * world-model wearable for everyone and to the custom viewmodel for the
+ * owner; it is stopped (EffectDispatch ParticleEffectStop) when the boost
+ * ends. Re-sent every 2 s for players who only now see the entity.
+ *
+ * Stock (CTFPlayerShared::UpdateCritBoostEffect) shows the particle only for
+ * full crit boosts (IsCritBoosted), Crit-a-Cola (TF_COND_ENERGY_BUFF) and
+ * the sniper rage buff; a Buff Banner / umbrella mini-crit boost
+ * (TF_COND_OFFENSEBUFF) has no particle, only the weapon colour tint.
+ *
+ * The tint is the materials' ModelGlowColor proxy (CProxyModelGlowColor):
+ * crit = team red/blue, OFFENSEBUFF or ENERGY_BUFF = orange/teal. It finds the
+ * player through IHasOwner, which the weapon, the viewmodel and the viewmodel
+ * attachment implement but CEconEntity (tf_wearable) does not, so the custom
+ * viewmodel is tinted by the game and the third-person world-model wearable
+ * never was. The wearable gets an m_clrRender tint instead (modulation can
+ * only darken toward the colour; the stock proxy over-brightens $color2).
+ */
+static const TFCond g_CritConds[] =
+{
+	TFCond_Kritzkrieged, TFCond_HalloweenCritCandy, TFCond_CritCanteen, TFCond_CritDemoCharge,
+	TFCond_CritOnFirstBlood, TFCond_CritOnWin, TFCond_CritOnFlagCapture, TFCond_CritOnKill,
+	TFCond_CritMmmph, TFCond_CritOnDamage, TFCond_CritRuneTemp
+};
+
+bool CritBoosted(int client)
+{
+	for (int i = 0; i < sizeof(g_CritConds); i++)
+		if (TF2_IsPlayerInCondition(client, g_CritConds[i]))
+			return true;
+	return false;
+}
+
+/** Stock particle conditions: full crits, Crit-a-Cola, sniper rage. */
+bool GlowBoosted(int client)
+{
+	return CritBoosted(client) || TF2_IsPlayerInCondition(client, TFCond_CritCola)
+		|| TF2_IsPlayerInCondition(client, TFCond_FocusBuff);
+}
+
+/** Third-person wearable tint matching the proxy's colour choice; false = none. */
+bool GlowTint(int client, int &r, int &g, int &b)
+{
+	bool blue = GetClientTeam(client) == view_as<int>(TFTeam_Blue);
+	if (CritBoosted(client))
+	{
+		// proxy 80 8 5 / 5 20 80, normalised to the brightest channel
+		r = blue ? 16 : 255;  g = blue ? 64 : 26;  b = blue ? 255 : 16;
+		return true;
+	}
+	if (TF2_IsPlayerInCondition(client, TFCond_Buffed) || TF2_IsPlayerInCondition(client, TFCond_CritCola))
+	{
+		// proxy 226 150 62 / 29 202 135
+		r = blue ? 37 : 255;  g = blue ? 255 : 169;  b = blue ? 170 : 70;
+		return true;
+	}
+	return false;
+}
+
+int g_iTintWorld[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
+
+void UpdateWorldTint(int client)
+{
+	int world = EntRefToEntIndex(g_iWorldWearable[client]);
+	int old = EntRefToEntIndex(g_iTintWorld[client]);
+	int r, g, b;
+	bool tint = world > MaxClients && g_cvCritGlow.BoolValue && GlowTint(client, r, g, b);
+	if (old > MaxClients && (old != world || !tint))
+		SetEntityRenderColor(old, 255, 255, 255, 255);
+	if (tint)
+	{
+		SetEntityRenderColor(world, r, g, b, 255);
+		g_iTintWorld[client] = EntIndexToEntRef(world);
+	}
+	else
+		g_iTintWorld[client] = INVALID_ENT_REFERENCE;
+}
+
+void UpdateCritGlow(int client)
+{
+	UpdateWorldTint(client);
+	// Third person: the world-model wearable. First person: the custom
+	// viewmodel (repurposed weapons; family-mode weapons show the stock
+	// c_model, which gets the game's own glow).
+	int world = EntRefToEntIndex(g_iWorldWearable[client]);
+	int view = -1;
+	int active = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	if (active > MaxClients && GetEntProp(active, Prop_Send, "m_bBeingRepurposedForTaunt")
+		&& !GetEntProp(client, Prop_Send, "m_nForceTauntCam"))
+		view = GetEntPropEnt(client, Prop_Send, "m_hViewModel");
+	if ((world <= MaxClients && view <= MaxClients) || !g_cvCritGlow.BoolValue || !GlowBoosted(client))
+	{
+		StopCritGlow(client);
+		return;
+	}
+	float now = GetGameTime();
+	int worldRef = world > MaxClients ? EntIndexToEntRef(world) : INVALID_ENT_REFERENCE;
+	int viewRef = view > MaxClients ? EntIndexToEntRef(view) : INVALID_ENT_REFERENCE;
+	int weaponRef = EntIndexToEntRef(active);
+	bool resend = now >= g_flGlowResend[client] || g_flGlowResend[client] - now > 2.0;
+	bool switched = g_iGlowWeapon[client] != weaponRef;   // new weapon: new wearable and v_model
+	int old = EntRefToEntIndex(g_iGlowWorld[client]);
+	if (old > MaxClients && g_iGlowWorld[client] != worldRef)
+		StopEntityParticles(old, 0);
+	old = EntRefToEntIndex(g_iGlowView[client]);
+	if (old > MaxClients && g_iGlowView[client] != viewRef)
+		StopEntityParticles(old, client);
+	char name[40];
+	FormatEx(name, sizeof(name), "critgun_weaponmodel_%s", GetClientTeam(client) == view_as<int>(TFTeam_Blue) ? "blu" : "red");
+	if (world > MaxClients && (resend || switched || g_iGlowWorld[client] != worldRef))
+		SendGlow(world, name, 0);
+	if (view > MaxClients && (resend || switched || g_iGlowView[client] != viewRef))
+		SendGlow(view, name, client);
+	g_iGlowWorld[client] = worldRef;
+	g_iGlowView[client] = viewRef;
+	g_iGlowWeapon[client] = weaponRef;
+	if (resend)
+		g_flGlowResend[client] = now + 2.0;
+}
+
+void ClearWorldTint(int client)
+{
+	int t = EntRefToEntIndex(g_iTintWorld[client]);
+	if (t > MaxClients)
+		SetEntityRenderColor(t, 255, 255, 255, 255);
+	g_iTintWorld[client] = INVALID_ENT_REFERENCE;
+}
+
+void StopCritGlow(int client)
+{
+	int e = EntRefToEntIndex(g_iGlowWorld[client]);
+	if (e > MaxClients)
+		StopEntityParticles(e, 0);
+	e = EntRefToEntIndex(g_iGlowView[client]);
+	if (e > MaxClients)
+		StopEntityParticles(e, client);
+	g_iGlowWorld[client] = INVALID_ENT_REFERENCE;
+	g_iGlowView[client] = INVALID_ENT_REFERENCE;
+	g_iGlowWeapon[client] = INVALID_ENT_REFERENCE;
+	g_flGlowResend[client] = 0.0;
+}
+
+/** Glow on an entity; only = 0 for everyone, else that client only. Replaces what was there. */
+void SendGlow(int entity, const char[] name, int only)
+{
+	static int table = INVALID_STRING_TABLE;
+	if (table == INVALID_STRING_TABLE)
+		table = FindStringTable("ParticleEffectNames");
+	int idx = table != INVALID_STRING_TABLE ? FindStringIndex(table, name) : INVALID_STRING_INDEX;
+	if (idx == INVALID_STRING_INDEX)
+		return;
+	float pos[3];
+	GetEntPropVector(entity, Prop_Data, "m_vecAbsOrigin", pos);
+	TE_Start("TFParticleEffect");
+	TE_WriteFloat("m_vecOrigin[0]", pos[0]);
+	TE_WriteFloat("m_vecOrigin[1]", pos[1]);
+	TE_WriteFloat("m_vecOrigin[2]", pos[2]);
+	TE_WriteNum("m_iParticleSystemIndex", idx);
+	TE_WriteNum("entindex", entity);
+	TE_WriteNum("m_iAttachType", 1);         // PATTACH_ABSORIGIN_FOLLOW
+	TE_WriteNum("m_bResetParticles", 1);     // the re-send replaces, never stacks
+	if (only)
+		TE_SendToClient(only);
+	else
+		TE_SendToAll();
+}
+
+/** ParticleEffectStop on an entity (only = 0 for everyone). */
+void StopEntityParticles(int entity, int only)
+{
+	static int table = INVALID_STRING_TABLE;
+	if (table == INVALID_STRING_TABLE)
+		table = FindStringTable("EffectDispatch");
+	if (table == INVALID_STRING_TABLE)
+		return;
+	// Effect names enter the table when the server first dispatches them.
+	int idx = FindStringIndex(table, "ParticleEffectStop");
+	if (idx == INVALID_STRING_INDEX)
+	{
+		bool save = LockStringTables(false);
+		AddToStringTable(table, "ParticleEffectStop");
+		LockStringTables(save);
+		idx = FindStringIndex(table, "ParticleEffectStop");
+		if (idx == INVALID_STRING_INDEX)
+			return;
+	}
+	TE_Start("EffectDispatch");
+	TE_WriteNum("entindex", entity);
+	TE_WriteNum("m_iEffectName", idx);
+	if (only)
+	{
+		if (IsClientInGame(only))
+			TE_SendToClient(only);
+	}
+	else
+		TE_SendToAll();
+}
+
+/* ========================================================================= */
 /* Ammo packs (and pack weapon grants)                                       */
 /* ========================================================================= */
 
@@ -1950,6 +2367,13 @@ public Action Hook_AmmoTouch(int pack, int other)
 	if (other < 1 || other > MaxClients || !IsPlayerAlive(other) || TF2CC_GetRole(other) == TF2CC_ROLE_NONE)
 		return Plugin_Continue;
 	float now = GetGameTime();
+	// Game time restarts at every map change: a throttle stamp from the last
+	// map (players keep their slot) silently skipped every touch, so the stock
+	// pickup took the pack and no weapon ever spawned.
+	if (g_flNextPackTouch[other] - now > 1.0)
+		g_flNextPackTouch[other] = 0.0;
+	if (g_flPackReady[pack] - now > g_cvPackRespawn.FloatValue + 1.0)
+		g_flPackReady[pack] = 0.0;
 	if ((GetEntProp(pack, Prop_Send, "m_fEffects") & EF_NODRAW) || now < g_flPackReady[pack] || now < g_flNextPackTouch[other])
 		return Plugin_Continue;
 	g_flNextPackTouch[other] = now + 0.25;
@@ -1984,7 +2408,7 @@ public Action Hook_AmmoTouch(int pack, int other)
 		other, classname, pack, used, mapPack, roleOk, roll, g_cvPackWeapons.FloatValue, spawned);
 
 	// Hoarder's Stash: an unneeded ammo pack is carried for later.
-	if (!used && StashAdd(other, STASH_AMMO, WEAPON_NONE, -1, -1, -1, frac))
+	if (!used && StashAdd(other, STASH_AMMO, WEAPON_NONE, -1, -1, -1, frac, g_NoSnap))
 		used = true;
 	if (!used)
 		return Plugin_Continue;
@@ -2004,14 +2428,26 @@ bool SpawnPackWeapon(int client, int pack)
 	WeaponDef w;
 	g_Weapons.GetArray(idx, w);
 	char model[PLATFORM_MAX_PATH];
-	if (w.worldModel[0] && IsModelPrecached(w.worldModel))
-		strcopy(model, sizeof(model), w.worldModel);
-	else if (!ItemWorldModel(w.itemdef, model, sizeof(model)))
+	if (!PackWeaponModel(w, model, sizeof(model)))
 		return false;
 	float pos[3];
 	GetEntPropVector(pack, Prop_Data, "m_vecAbsOrigin", pos);
 	pos[2] += 16.0;
-	return SpawnGroundPickup(idx, w.itemdef, -1, -1, model, pos, view_as<float>({ 0.0, 0.0, 120.0 }), 0) > MaxClients;
+	return SpawnGroundPickup(idx, w.itemdef, -1, -1, model, pos, view_as<float>({ 0.0, 0.0, 120.0 }), 0, 0, g_NoSnap) > MaxClients;
+}
+
+/**
+ * The model a pack weapon lies on the floor as. Weapons without one (the Fists
+ * donor has no world model) are never picked: picking one made the grant fail.
+ */
+bool PackWeaponModel(WeaponDef w, char[] model, int maxlen)
+{
+	if (w.worldModel[0] && IsModelPrecached(w.worldModel))
+	{
+		strcopy(model, maxlen, w.worldModel);
+		return true;
+	}
+	return ItemWorldModel(w.itemdef, model, maxlen);
 }
 
 /** Stock world model for an item def (schema model_player). */
@@ -2038,6 +2474,7 @@ public Action Timer_PickupScan(Handle timer)
 	{
 		if (!IsClientInGame(client) || !IsPlayerAlive(client) || TF2CC_GetRole(client) == TF2CC_ROLE_NONE)
 			continue;
+		UpdateCritGlow(client);
 		RechargeConsumables(client);
 		RestoreAttributes(client);
 		// SetWeaponVisible(true) (deploy, taunt end) clears EF_NODRAW: re-hide the donor.
@@ -2120,10 +2557,12 @@ int PickPackWeaponInTier(int client, int tier)
 	int role = TF2CC_GetRole(client);
 	float total = 0.0;
 	WeaponDef w;
+	char model[PLATFORM_MAX_PATH];
 	for (int i = 0; i < g_Weapons.Length; i++)
 	{
 		g_Weapons.GetArray(i, w);
-		if (w.pickupWeight > 0.0 && (tier < 0 || w.tier == tier) && WeaponAllowedForRole(i, role) && !SlotHolds(client, w.slot, i))
+		if (w.pickupWeight > 0.0 && (tier < 0 || w.tier == tier) && WeaponAllowedForRole(i, role) && !SlotHolds(client, w.slot, i)
+			&& PackWeaponModel(w, model, sizeof(model)))
 			total += w.pickupWeight;
 	}
 	if (total <= 0.0)
@@ -2132,7 +2571,8 @@ int PickPackWeaponInTier(int client, int tier)
 	for (int i = 0; i < g_Weapons.Length; i++)
 	{
 		g_Weapons.GetArray(i, w);
-		if (w.pickupWeight <= 0.0 || (tier >= 0 && w.tier != tier) || !WeaponAllowedForRole(i, role) || SlotHolds(client, w.slot, i))
+		if (w.pickupWeight <= 0.0 || (tier >= 0 && w.tier != tier) || !WeaponAllowedForRole(i, role) || SlotHolds(client, w.slot, i)
+			|| !PackWeaponModel(w, model, sizeof(model)))
 			continue;
 		if (pick < w.pickupWeight)
 			return i;
@@ -2204,15 +2644,26 @@ int SpawnPickupFromSlot(int client, int slot, float upVel, bool deathDrop = fals
 	vel[2] += upVel + 120.0;
 	pos[2] -= 16.0;
 	return SpawnGroundPickup(weaponIdx, g_Inv[client][slot].itemdef, GetEntProp(ent, Prop_Send, "m_iClip1"),
-		g_Inv[client][slot].reserve, model, pos, vel, GetClientUserId(client));
+		g_Inv[client][slot].reserve, model, pos, vel, GetClientUserId(client), HeldSkin(client, slot), g_Snap[client][slot]);
+}
+
+/**
+ * The skin the held weapon shows, for its dropped copy. Custom world models are
+ * team 0/1 (CreateWearable). A stock item keeps the skin pair it was picked up
+ * with (australium 2/3, ...), TF2's red/blu pairs being even/odd.
+ */
+int HeldSkin(int client, int slot)
+{
+	int base = g_Inv[client][slot].weapon == STOCK_ITEM ? g_Snap[client][slot].skinBase : 0;
+	return base + (GetClientTeam(client) == view_as<int>(TFTeam_Blue) ? 1 : 0);
 }
 
 /**
  * A weapon lying on the ground (prop_physics debris + PickupData). Debris does
  * not touch players, so pickups are found by Timer_PickupScan proximity.
- * clip/reserve -1 = the weapon's defaults.
+ * clip/reserve -1 = the weapon's defaults. skin: the holder's (HeldSkin).
  */
-int SpawnGroundPickup(int weaponIdx, int itemdef, int clip, int reserve, const char[] model, const float pos[3], const float vel[3], int dropper)
+int SpawnGroundPickup(int weaponIdx, int itemdef, int clip, int reserve, const char[] model, const float pos[3], const float vel[3], int dropper, int skin, const ItemSnapshot snap)
 {
 	if (!model[0])
 		return -1;
@@ -2222,12 +2673,14 @@ int SpawnGroundPickup(int weaponIdx, int itemdef, int clip, int reserve, const c
 	DispatchKeyValue(prop, "model", model);
 	DispatchKeyValue(prop, "spawnflags", "6"); // debris + no damage
 	DispatchKeyValue(prop, "targetname", "tf2cc_pickup");
+	DispatchKeyValueInt(prop, "skin", skin);
 	SetEntProp(prop, Prop_Data, "m_CollisionGroup", 1); // COLLISION_GROUP_DEBRIS
 	if (!DispatchSpawn(prop))
 	{
 		RemoveEntity(prop);
 		return -1;
 	}
+	SetEntProp(prop, Prop_Send, "m_nSkin", skin);
 	TeleportEntity(prop, pos, NULL_VECTOR, vel);
 
 	PickupData d;
@@ -2238,6 +2691,7 @@ int SpawnGroundPickup(int weaponIdx, int itemdef, int clip, int reserve, const c
 	d.expires = GetGameTime() + g_cvPickupLifetime.FloatValue;
 	d.dropper = dropper;
 	d.readyAt = GetGameTime() + 1.5;
+	d.snap = snap;
 
 	char key[16];
 	IntToString(EntIndexToEntRef(prop), key, sizeof(key));
@@ -2315,7 +2769,7 @@ bool TryPickupOurs(int client, int prop, bool force)
 	bool occupied = SlotOccupied(client, slot);
 	if (occupied && !force)
 	{
-		if (StashAdd(client, d.weapon >= 0 ? STASH_WEAPON : STASH_STOCK, d.weapon, d.itemdef, d.clip, d.reserve, 0.0))
+		if (StashAdd(client, d.weapon >= 0 ? STASH_WEAPON : STASH_STOCK, d.weapon, d.itemdef, d.clip, d.reserve, 0.0, d.snap))
 		{
 			g_Pickups.Remove(key);
 			RemoveEntity(prop);
@@ -2332,7 +2786,7 @@ bool TryPickupOurs(int client, int prop, bool force)
 
 	bool ok = d.weapon >= 0
 		? GiveCustomWeapon(client, d.weapon, d.clip, d.reserve, occupied)
-		: GiveStockItem(client, d.itemdef, 0, d.clip, d.reserve, occupied);
+		: GiveStockItemSnap(client, d.itemdef, 0, d.clip, d.reserve, occupied, d.snap);
 	if (!ok)
 		return false;
 
@@ -2367,8 +2821,10 @@ bool TryPickupStock(int client, int dropped, bool force)
 	// model's own set for the weapon's role (knife -> his MELEE set incl. the
 	// combat-knife backstab, minigun -> PRIMARY + PRIMARY_DEPLOYED spin, ...).
 	// First person: Merc arms on the donor class's animations (MarxVee rule).
+	ItemSnapshot snap;
+	SnapshotItem(dropped, snap);
 	bool occupied = SlotOccupied(client, slot);
-	if (occupied && !force && StashAdd(client, STASH_STOCK, STOCK_ITEM, itemdef, -1, -1, 0.0))
+	if (occupied && !force && StashAdd(client, STASH_STOCK, STOCK_ITEM, itemdef, -1, -1, 0.0, snap))
 	{
 		RemoveEntity(dropped);
 		return true;
@@ -2384,13 +2840,8 @@ bool TryPickupStock(int client, int dropped, bool force)
 	// and the default reserve; the reads stay for a future TF2 that exposes them.
 	int clip = HasEntProp(dropped, Prop_Send, "m_nClip") ? GetEntProp(dropped, Prop_Send, "m_nClip") : -1;
 	int reserve = HasEntProp(dropped, Prop_Send, "m_nAmmo") ? GetEntProp(dropped, Prop_Send, "m_nAmmo") : -1;
-	ItemSnapshot snap;
-	SnapshotItem(dropped, snap);
-	if (!GiveStockItem(client, itemdef, 0, clip, reserve, occupied))
+	if (!GiveStockItemSnap(client, itemdef, 0, clip, reserve, occupied, snap))
 		return false;
-	int given = EntRefToEntIndex(g_Inv[client][slot].entRef);
-	if (given > MaxClients)
-		ApplySnapshot(given, snap);
 	RemoveEntity(dropped);
 	EmitSoundToClient(client, g_sPickupSound);
 	int ent = EntRefToEntIndex(g_Inv[client][slot].entRef);
@@ -2419,7 +2870,10 @@ public Action Listener_Inspect(int client, const char[] command, int argc)
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
 	if (IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+	{
 		ClampReserves(client);
+		KeepWeaponModel(client);
+	}
 	if (g_sLoopSnd[client][0] && (!IsPlayerAlive(client) || EntRefToEntIndex(g_iLoopEnt[client]) != GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon")
 		|| (!(buttons & IN_ATTACK) && GetGameTime() - g_flLoopAt[client] > 0.15)))
 		StopLoopSound(client);
@@ -2607,14 +3061,20 @@ public void Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast
 	}
 	if (g_cvDropOnDeath.BoolValue && (RoleCanPickup(client) || always))
 	{
-
 		int slot = dSlot;
-		if (slot >= 0 && (always || !IsDefaultLoadoutWeapon(client, slot)))
+		// A picked-up stock item has already fallen as the game's own
+		// tf_dropped_weapon (spawned before player_death, with the item's real
+		// skin and attributes): a tf2cc pickup as well dropped it twice.
+		bool stockDropped = slot >= 0 && g_Inv[client][slot].weapon == STOCK_ITEM
+			&& FindFreshStockDrop(client, g_Inv[client][slot].itemdef) != -1;
+		if (slot >= 0 && !stockDropped && (always || !IsDefaultLoadoutWeapon(client, slot)))
 		{
 			SyncAmmoFromEntity(client, slot);
 			SpawnPickupFromSlot(client, slot, 60.0, true);
 		}
 	}
+	StopCritGlow(client);
+	ClearWorldTint(client);
 	RemoveOverlay(client);
 	ClearInventory(client); // next life starts from the role loadout
 	StashClear(client);
@@ -2882,24 +3342,27 @@ public Action Hook_Sound(int clients[MAXPLAYERS], int &numClients, char sample[P
 	char norm[PLATFORM_MAX_PATH], find[PLATFORM_MAX_PATH];
 	strcopy(norm, sizeof(norm), sample);
 	NormaliseSample(norm);
-	for (int i = 0; i + 1 < w.sounds.Length; i += 2)
+	// Several entries with the same "find" = pick one at random (e.g. the
+	// donor bat's single flesh hit -> HL crowbar cbar_hitbod1-3).
+	int matches[16], n = 0;
+	for (int i = 0; i + 1 < w.sounds.Length && n < sizeof(matches); i += 2)
 	{
 		w.sounds.GetString(i, find, sizeof(find));
 		if (StrEqual(norm, find))
-		{
-			w.sounds.GetString(i + 1, sample, sizeof(sample));
-			if (w.soundsLoop)
-			{
-				strcopy(g_sLoopSnd[owner], sizeof(g_sLoopSnd[]), sample);
-				g_iLoopEnt[owner] = EntIndexToEntRef(entity);
-				g_iLoopChan[owner] = channel;
-				g_flLoopAt[owner] = GetGameTime();
-			}
-			EchoToOwner(owner, clients, numClients, sample, entity, channel, volume, level, pitch, flags);
-			return Plugin_Changed;
-		}
+			matches[n++] = i;
 	}
-	return Plugin_Continue;
+	if (n == 0)
+		return Plugin_Continue;
+	w.sounds.GetString(matches[GetRandomInt(0, n - 1)] + 1, sample, sizeof(sample));
+	if (w.soundsLoop)
+	{
+		strcopy(g_sLoopSnd[owner], sizeof(g_sLoopSnd[]), sample);
+		g_iLoopEnt[owner] = EntIndexToEntRef(entity);
+		g_iLoopChan[owner] = channel;
+		g_flLoopAt[owner] = GetGameTime();
+	}
+	EchoToOwner(owner, clients, numClients, sample, entity, channel, volume, level, pitch, flags);
+	return Plugin_Changed;
 }
 
 
@@ -2923,6 +3386,7 @@ enum struct StashItem
 	int clip;
 	int reserve;
 	float amount;
+	ItemSnapshot snap;   // stock item look
 }
 
 ArrayList g_Stash[MAXPLAYERS + 1];
@@ -2943,7 +3407,7 @@ int StashCapacity(int client)
 	return 0;
 }
 
-bool StashAdd(int client, int type, int weapon, int itemdef, int clip, int reserve, float amount)
+bool StashAdd(int client, int type, int weapon, int itemdef, int clip, int reserve, float amount, const ItemSnapshot snap)
 {
 	int cap = StashCapacity(client);
 	if (cap <= 0)
@@ -2962,6 +3426,7 @@ bool StashAdd(int client, int type, int weapon, int itemdef, int clip, int reser
 	it.clip = clip;
 	it.reserve = reserve;
 	it.amount = amount;
+	it.snap = snap;
 	g_Stash[client].PushArray(it);
 	char name[64];
 	StashItemName(it, name, sizeof(name));
@@ -3012,7 +3477,7 @@ public Action Hook_HealthTouch(int kit, int other)
 	char classname[64];
 	GetEntityClassname(kit, classname, sizeof(classname));
 	float frac = StrEqual(classname, "item_healthkit_small") ? 0.205 : (StrEqual(classname, "item_healthkit_medium") ? 0.5 : 1.0);
-	if (!StashAdd(other, STASH_HEALTH, WEAPON_NONE, -1, -1, -1, frac))
+	if (!StashAdd(other, STASH_HEALTH, WEAPON_NONE, -1, -1, -1, frac, g_NoSnap))
 		return Plugin_Continue;
 	ConsumePack(kit, classname);
 	return Plugin_Handled;
@@ -3154,11 +3619,12 @@ void UseStashItem(int client, int index)
 				old.itemdef = g_Inv[client][slot].itemdef;
 				old.clip = g_Inv[client][slot].clip;
 				old.reserve = g_Inv[client][slot].reserve;
+				old.snap = g_Snap[client][slot];
 				g_Stash[client].PushArray(old);
 			}
 			bool ok = it.type == STASH_WEAPON
 				? GiveCustomWeapon(client, it.weapon, it.clip, it.reserve, false)
-				: GiveStockItem(client, it.itemdef, 0, it.clip, it.reserve, false);
+				: GiveStockItemSnap(client, it.itemdef, 0, it.clip, it.reserve, false, it.snap);
 			int ent = EntRefToEntIndex(g_Inv[client][slot].entRef);
 			if (ok && ent > MaxClients)
 				SwitchTo(client, ent);
@@ -3219,16 +3685,6 @@ public Action Timer_VMTrace(Handle timer)
 /* Item identity of picked-up stock weapons                                  */
 /* ------------------------------------------------------------------------- */
 
-#define SNAP_MAX 32
-
-enum struct ItemSnapshot
-{
-	int quality;
-	int level;
-	int count;
-	int defs[SNAP_MAX];
-	float values[SNAP_MAX];
-}
 
 /**
  * Quality/level plus the item's own attributes: SOC (paint, australium,
@@ -3239,6 +3695,9 @@ enum struct ItemSnapshot
 void SnapshotItem(int dropped, ItemSnapshot snap)
 {
 	snap.count = 0;
+	// The tf_dropped_weapon carries the item's real skin (TF2 sets it a frame
+	// after spawn): keep its red/blu pair for this weapon's own drops.
+	snap.skinBase = HasEntProp(dropped, Prop_Send, "m_nSkin") ? GetEntProp(dropped, Prop_Send, "m_nSkin") & ~1 : 0;
 	snap.quality = HasEntProp(dropped, Prop_Send, "m_iEntityQuality") ? GetEntProp(dropped, Prop_Send, "m_iEntityQuality") : -1;
 	snap.level = HasEntProp(dropped, Prop_Send, "m_iEntityLevel") ? GetEntProp(dropped, Prop_Send, "m_iEntityLevel") : -1;
 	if (!g_bTF2Attributes)
@@ -3262,7 +3721,7 @@ void SnapshotItem(int dropped, ItemSnapshot snap)
 	}
 }
 
-void ApplySnapshot(int weapon, ItemSnapshot snap)
+void ApplySnapshot(int weapon, const ItemSnapshot snap)
 {
 	if (snap.quality >= 0)
 		SetEntProp(weapon, Prop_Send, "m_iEntityQuality", snap.quality);
@@ -3273,6 +3732,14 @@ void ApplySnapshot(int weapon, ItemSnapshot snap)
 	for (int i = 0; i < snap.count; i++)
 		TF2Attrib_SetByDefIndex(weapon, snap.defs[i], snap.values[i]);
 	TF2Attrib_ClearCache(weapon);
+}
+
+/** Regenerate / MvM upgrades rebuild the runtime attribute list: put the item's look back when it is gone. */
+void ReapplySnapshot(int weapon, const ItemSnapshot snap)
+{
+	if (!g_bTF2Attributes || snap.count == 0 || TF2Attrib_GetByDefIndex(weapon, snap.defs[0]) != Address_Null)
+		return;
+	ApplySnapshot(weapon, snap);
 }
 
 public Action Cmd_VMState(int client, int args)
@@ -3342,7 +3809,26 @@ public Action Cmd_VMState(int client, int args)
  */
 public void Hook_StockDropSpawned(int entity)
 {
+	g_flStockDropAt[entity] = GetGameTime();
 	RequestFrame(Frame_CheckStockDrop, EntIndexToEntRef(entity));
+}
+
+/** The game's death drop of this item: a tf_dropped_weapon spawned this tick near the player, or -1. */
+int FindFreshStockDrop(int client, int itemdef)
+{
+	float now = GetGameTime(), pos[3], dpos[3];
+	GetClientAbsOrigin(client, pos);
+	int ent = -1;
+	while ((ent = FindEntityByClassname(ent, "tf_dropped_weapon")) != -1)
+	{
+		float age = now - g_flStockDropAt[ent];
+		if (age < -0.1 || age > 0.1 || GetEntProp(ent, Prop_Send, "m_iItemDefinitionIndex") != itemdef)
+			continue;
+		GetEntPropVector(ent, Prop_Data, "m_vecAbsOrigin", dpos);
+		if (GetVectorDistance(pos, dpos) <= 200.0)
+			return ent;
+	}
+	return -1;
 }
 
 public void Frame_CheckStockDrop(int ref)
@@ -3356,7 +3842,10 @@ public void Frame_CheckStockDrop(int ref)
 	float now = GetGameTime();
 	for (int c = 1; c <= MaxClients; c++)
 	{
-		if (now - g_flDiedAt[c] > 1.0 || GetVectorDistance(pos, g_vecDiedAt[c]) > 200.0)
+		// A frame callback can read a slightly earlier game time than the
+		// death event; far negative ages are last-map timestamps.
+		float age = now - g_flDiedAt[c];
+		if (age < -0.5 || age > 1.0 || GetVectorDistance(pos, g_vecDiedAt[c]) > 200.0)
 			continue;
 		for (int s = 0; s < SLOT_COUNT; s++)
 		{
@@ -3420,6 +3909,8 @@ void RestoreAttributes(int client)
 	for (int s = 0; s < SLOT_COUNT; s++)
 	{
 		int ent = EntRefToEntIndex(g_Inv[client][s].entRef);
+		if (ent > MaxClients && g_Inv[client][s].weapon == STOCK_ITEM)
+			ReapplySnapshot(ent, g_Snap[client][s]);
 		if (ent <= MaxClients || g_Inv[client][s].weapon < 0)
 			continue;
 		if (!ReapplyCustomAttributes(ent, g_Inv[client][s].weapon))

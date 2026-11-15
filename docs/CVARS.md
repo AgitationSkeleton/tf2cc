@@ -128,6 +128,7 @@ Config file: `cfg/sourcemod/tf2cc_specials.cfg`
 | `tf2cc_chainsaw_windup` | `1.0` | >= 0 | Chainsaw wind-up before it cuts (OF_CHAINSAW_WINDUP_TIME 1.0; halved while charging). |
 | `tf2cc_chainsaw_charge_time` | `3.0` | >= 0 | Chainsaw alt-fire charge length (OF ChargeDuration 1.5, measured 2x in game). |
 | `tf2cc_chainsaw_charge_recharge` | `8.0` | >= 0 | Seconds for the chainsaw charge to refill (OF ChargeRechargeRate 8). |
+| `tf2cc_chainsaw_charge_speed` | `720` | >= 1 | Chainsaw charge speed (OF of_shield_charge_speed 720; a demoknight charge is tf_max_charge_speed 750). |
 
 ## TF2CC Taunts (experimental) (`tf2cc_taunts.smx`)
 
@@ -154,6 +155,7 @@ Config file: `cfg/sourcemod/tf2cc_voice.cfg`
 | `tf2cc_voice_delay` | `-1` |  | Seconds between voice-menu lines per player; -1 = follow tf_max_voice_speak_delay (negative there = no delay). |
 | `tf2cc_voice_subtitles` | `0` | 0 .. 1 | Send the stock (Voice) chat subtitle for role voice-menu lines. |
 | `tf2cc_voice_level` | `95` |  | Sound level (dB) for role voice lines (TF2 voice uses 95). |
+| `tf2cc_voice_coated_cooldown` | `6.0` | >= 0 | Seconds between a role player's negative/jeers lines when coated in Mad Milk, Jarate or Gas Passer. |
 
 | Command | Access | What it does |
 |---|---|---|
@@ -177,6 +179,7 @@ Config file: `cfg/sourcemod/tf2cc_weapons.cfg`
 | `tf2cc_pickup_lifetime` | `30.0` |  | Seconds a dropped Mercenary weapon stays on the ground. |
 | `tf2cc_pickup_auto_empty_slot` | `1` | 0 .. 1 | Touching a weapon whose slot is empty picks it up automatically (OF behaviour). |
 | `tf2cc_drop_on_death` | `1` | 0 .. 1 | Mercenary drops his active non-default weapon on death. |
+| `tf2cc_crit_glow` | `1` | 0 .. 1 | Show the stock crit/mini-crit weapon glow (critgun_weaponmodel_<team>) on custom weapons' world and view models while the holder is boosted. |
 | `tf2cc_stock_pickups` | `1` | 0 .. 1 | Mercenary may pick up weapons dropped by any class (tf_dropped_weapon). |
 | `tf2cc_viewmodel_mode` | `auto` |  | First-person viewmodels: auto (OF/TF2C v_model when generated, else role arms) \| custom \| family. Per-weapon "viewmodel_mode" overrides. |
 | `tf2cc_weapon_profile` | `source` |  | Weapon behaviour profile: source (Open Fortress / TF2 Classic accurate) \| marxvee (legacy MarxVee tuning). Per-weapon "profile" in weapons.cfg overrides. Applies from the next spawn. |

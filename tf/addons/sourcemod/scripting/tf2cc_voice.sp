@@ -52,6 +52,9 @@ int g_iForcedSpyTarget = -1;     // sm_tf2cc_spytest
 char g_sLastSpyConcept[64];
 StringMap g_PersonaSamples;           // "persona|sample" -> true
 float g_flNextPain[MAXPLAYERS + 1];
+float g_flNextCoated[MAXPLAYERS + 1];  // Mad Milk / Jarate / Gas Passer reaction cooldown
+bool g_bWasCoated[MAXPLAYERS + 1];
+ConVar g_cvCoatedCooldown;
 
 // Disguise class (TFClassType) -> CloakedSpyIdentify index used by TF2C/OF lines.
 // TFClassType -> TF2C cloakedspyidentify number (TF2C talker: scout 01, soldier 02,
@@ -72,6 +75,7 @@ public void OnPluginStart()
 	g_cvStockDelay = FindConVar("tf_max_voice_speak_delay");
 	AddNormalSoundHook(Hook_StockSpeech);
 	g_cvLevel = CreateConVar("tf2cc_voice_level", "95", "Sound level (dB) for role voice lines (TF2 voice uses 95).");
+	g_cvCoatedCooldown = CreateConVar("tf2cc_voice_coated_cooldown", "6.0", "Seconds between a role player's negative/jeers lines when coated in Mad Milk, Jarate or Gas Passer.", _, true, 0.0);
 	AutoExecConfig(true, "tf2cc_voice");
 
 	RegAdminCmd("sm_tf2cc_voice_reload", Cmd_Reload, ADMFLAG_CONFIG, "Reload voice.cfg.");
@@ -94,6 +98,9 @@ public void OnPluginStart()
 public void OnMapStart()
 {
 	PrecacheAll();
+	// Game time restarts with the map: drop stale cooldown stamps.
+	for (int i = 1; i <= MaxClients; i++)
+		g_flNextCoated[i] = 0.0;
 }
 
 public void OnClientPutInServer(int client)
@@ -102,6 +109,41 @@ public void OnClientPutInServer(int client)
 	g_flNextPain[client] = 0.0;
 	g_flLastStock[client] = 0.0;
 	g_flLastEvent[client] = 0.0;
+	g_flNextCoated[client] = 0.0;
+	g_bWasCoated[client] = false;
+}
+
+/**
+ * Coated in Mad Milk, Jarate or Gas Passer: a random negative or jeers line.
+ * Polled (rising edge per frame) instead of TF2_OnConditionAdded: on the
+ * current TF2 build with TF2 Tools 1.12.0.7200 that forward never fired on
+ * the test server (not for TF2_AddCondition, not for any client).
+ */
+public void OnGameFrame()
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		bool coated = false;
+		if (IsClientInGame(client) && IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+			coated = TF2_IsPlayerInCondition(client, TFCond_Milked) || TF2_IsPlayerInCondition(client, TFCond_Jarated)
+				|| TF2_IsPlayerInCondition(client, TFCond_Gas);
+		if (coated && !g_bWasCoated[client])
+			OnCoated(client);
+		g_bWasCoated[client] = coated;
+	}
+}
+
+void OnCoated(int client)
+{
+	float now = GetGameTime();
+	if (now < g_flNextCoated[client])
+		return;
+	// Pick one of the two concepts at random; fall back to the other if the
+	// persona has no lines for it.
+	static const char concepts[][] = { "_negativevocalization", "_jeers" };
+	int first = GetRandomInt(0, 1);
+	if (Speak(client, concepts[first]) || Speak(client, concepts[1 - first]))
+		g_flNextCoated[client] = now + g_cvCoatedCooldown.FloatValue;
 }
 
 public Action Cmd_Reload(int client, int args)

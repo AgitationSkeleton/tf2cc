@@ -20,6 +20,9 @@
 #include <sdkhooks>
 #include <tf2>
 #include <tf2_stocks>
+#undef REQUIRE_PLUGIN
+#include <tf2attributes>
+#define REQUIRE_PLUGIN
 #include <tf2cc>
 
 native bool TF2CC_GetWeaponSpecial(int weapon, char[] special, int maxlen, float &value);
@@ -109,8 +112,13 @@ char g_sGatFire[MAXPLAYERS + 1][48];
 #define CS_SND_CHARGE "weapons/chainsaw_charge.wav"
 #define CS_SND_DING "weapons/chainsaw_recharge.wav"
 char CS_SOUNDS[][] = { CS_SND_IDLE, CS_SND_WINDUP, CS_SND_FIRE, CS_SND_FIRE_CRIT, CS_SND_WINDDOWN, CS_SND_CHARGE, CS_SND_DING };
+// "DemoCharge.Charging" (game_sounds_weapons.txt, CHAN_STATIC, rndwave): the
+// Demoman's charge yell. Every client emits it itself when it sees the
+// condition arrive (CTFPlayerShared::OnAddShieldCharge is CLIENT_DLL there),
+// so a server sound hook never sees it; the server stops it instead.
+char CS_DEMO_SCREAM[][] = { "weapons/demo_charge_windup1.wav", "weapons/demo_charge_windup2.wav", "weapons/demo_charge_windup3.wav" };
 
-ConVar g_cvCsDamage, g_cvCsInterval, g_cvCsRange, g_cvCsWindup, g_cvCsCharge, g_cvCsRecharge;
+ConVar g_cvCsDamage, g_cvCsInterval, g_cvCsRange, g_cvCsWindup, g_cvCsCharge, g_cvCsRecharge, g_cvCsSpeed;
 int g_iCsState[MAXPLAYERS + 1];
 int g_iCsWeapon[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };   // chainsaw currently held (rev sound source)
 float g_flCsNext[MAXPLAYERS + 1];        // wind-up end / next hit
@@ -118,6 +126,10 @@ float g_flCsNextSound[MAXPLAYERS + 1];
 char g_sCsFireSound[MAXPLAYERS + 1][48];
 float g_flCsChargeEnd[MAXPLAYERS + 1];
 float g_flCsChargeReady[MAXPLAYERS + 1];
+float g_flCsChargeStart[MAXPLAYERS + 1];
+bool g_bCsSpeedAttr[MAXPLAYERS + 1];     // charge speed attribute applied (ChargeSpeedStart)
+float g_flCsSpeedAttrOld[MAXPLAYERS + 1]; // its previous value, -1 = none
+#define CS_SPEED_ATTR "major move speed bonus"   // mult_player_movespeed, rarely used by anything else
 bool g_bCsDing[MAXPLAYERS + 1];
 bool g_bCsAttack2[MAXPLAYERS + 1];
 
@@ -177,6 +189,7 @@ public void OnPluginStart()
 	g_cvCsWindup = CreateConVar("tf2cc_chainsaw_windup", "1.0", "Chainsaw wind-up before it cuts (OF_CHAINSAW_WINDUP_TIME 1.0; halved while charging).", _, true, 0.0);
 	g_cvCsCharge = CreateConVar("tf2cc_chainsaw_charge_time", "3.0", "Chainsaw alt-fire charge length (OF ChargeDuration 1.5, measured 2x in game).", _, true, 0.0);
 	g_cvCsRecharge = CreateConVar("tf2cc_chainsaw_charge_recharge", "8.0", "Seconds for the chainsaw charge to refill (OF ChargeRechargeRate 8).", _, true, 0.0);
+	g_cvCsSpeed = CreateConVar("tf2cc_chainsaw_charge_speed", "720", "Chainsaw charge speed (OF of_shield_charge_speed 720; a demoknight charge is tf_max_charge_speed 750).", _, true, 1.0);
 	AddNormalSoundHook(Hook_ChainsawSounds);
 	AddTempEntHook("TFExplosion", TE_TFExplosion);
 	AutoExecConfig(true, "tf2cc_specials");
@@ -192,6 +205,22 @@ public void OnPluginStart()
 public void OnMapStart()
 {
 	g_iBombLive = 0;
+	// Game time restarts with the map: last-map stamps would read as far in the
+	// future (cooldowns locked, an infection still running).
+	for (int i = 1; i <= MaxClients; i++)
+	{
+		g_flNextBlast[i] = 0.0;
+		g_flNextMed[i] = 0.0;
+		g_flInfectEnd[i] = 0.0;
+		g_flSawEnd[i] = 0.0;
+		g_flGatNextFire[i] = 0.0;
+		g_flCsNext[i] = 0.0;
+		g_flCsChargeEnd[i] = 0.0;
+		g_flCsChargeReady[i] = 0.0;
+		g_flCsChargeStart[i] = 0.0;
+	}
+	for (int i = 0; i < sizeof(CS_DEMO_SCREAM); i++)
+		PrecacheSound(CS_DEMO_SCREAM[i], true);
 	PrecacheSound(HEAL_SOUND, true);
 	PrecacheSound(ZAP_SOUND, true);
 	PrecacheSound(HOOK_HIT_SOUND, true);
@@ -437,7 +466,11 @@ public void Event_DeathStopLoops(Event event, const char[] name, bool dontBroadc
 {
 	int client = GetClientOfUserId(event.GetInt("userid"));
 	if (client)
+	{
 		StopLoopSounds(client);
+		g_flCsChargeEnd[client] = 0.0;
+		ChargeSpeedEnd(client);
+	}
 }
 
 public void OnEntityDestroyed(int entity)
@@ -1209,6 +1242,10 @@ bool ChainsawThink(int client, int &buttons)
 		if (held > MaxClients || g_iCsState[client] != CS_IDLE)
 			ChainsawStop(client, held);
 		ChainsawChargeTick(client, now);
+		// Alt-fire edge state follows the button while the saw is away: it was
+		// only updated with the saw out, so dying or switching with alt-fire
+		// held left it set and the next press on the saw started no charge.
+		g_bCsAttack2[client] = (buttons & IN_ATTACK2) != 0;
 		return false;
 	}
 	if (held != active)
@@ -1229,12 +1266,14 @@ bool ChainsawThink(int client, int &buttons)
 	{
 		float len = g_cvCsCharge.FloatValue;
 		g_flCsChargeEnd[client] = now + len;
+		g_flCsChargeStart[client] = now;
 		g_flCsChargeReady[client] = now + len + g_cvCsRecharge.FloatValue;
 		g_bCsDing[client] = true;
 		SetEntPropFloat(client, Prop_Send, "m_flChargeMeter", 100.0);
 		TF2_AddCondition(client, TFCond_Charging, len);
 		TF2_AddCondition(client, TFCond_CritDemoCharge, len);   // CritOnChargeLevel 1
 		EmitSoundToAll(CS_SND_CHARGE, client, SNDCHAN_AUTO, SNDLEVEL_NORMAL);
+		ChargeSpeedStart(client);
 		charging = true;
 	}
 	g_bCsAttack2[client] = attack2;
@@ -1370,6 +1409,7 @@ void ChainsawStop(int client, int held)
 		TF2_RemoveCondition(client, TFCond_Charging);
 		TF2_RemoveCondition(client, TFCond_CritDemoCharge);
 	}
+	ChargeSpeedEnd(client);
 }
 
 /** Keeps the stock charge (its 1.5 s meter drain) going for the OF length; ding when refilled. */
@@ -1382,16 +1422,82 @@ bool ChainsawChargeTick(int client, float now)
 			EmitSoundToClient(client, CS_SND_DING);
 	}
 	if (g_flCsChargeEnd[client] <= now)
+	{
+		ChargeSpeedEnd(client);
 		return false;
+	}
 	if (!TF2_IsPlayerInCondition(client, TFCond_Charging))
 	{
 		// Bumped into something / stopped by the game: end like OF does.
 		g_flCsChargeEnd[client] = 0.0;
 		TF2_RemoveCondition(client, TFCond_CritDemoCharge);
+		ChargeSpeedEnd(client);
 		return false;
 	}
 	SetEntPropFloat(client, Prop_Send, "m_flChargeMeter", 100.0);
+	ChargeSpeed(client);
+	// Every client yells "DemoCharge.Charging" on its own when the condition
+	// arrives; stop it for a moment after the start (an earlier stop is a no-op,
+	// so it is repeated until the condition has surely reached everyone).
+	if (now - g_flCsChargeStart[client] < 0.3)
+		for (int i = 0; i < sizeof(CS_DEMO_SCREAM); i++)
+			StopSound(client, SNDCHAN_STATIC, CS_DEMO_SCREAM[i]);
 	return true;
+}
+
+/**
+ * The charge movement itself is class-independent (CTFGameMovement::ChargeMove
+ * forces full forward input at tf_max_charge_speed), but the player's own speed
+ * cap still applies (CGameMovement::CheckParameters, m_flClientMaxSpeed) and
+ * only a Demoman gets the charge speed from TeamFortress_CalculateMaxSpeed: a
+ * class-10 charge walked at the role's speed (320).
+ *
+ * TF2 recomputes m_flMaxspeed from TeamFortress_CalculateMaxSpeed every frame
+ * (test server: a written value is back to the class speed one frame later,
+ * charging or not), on the server and in the owner's client prediction. So
+ * the charge speed comes from a player attribute in that calculation
+ * (mult_player_movespeed, networked with the player's attribute list: the
+ * owner predicts the same speed), plus m_flMaxspeed before every usercmd as a
+ * fallback without TF2Attributes (OnPlayerRunCmd runs before the move).
+ */
+void ChargeSpeedStart(int client)
+{
+	ChargeSpeedEnd(client);
+	float cur = GetEntPropFloat(client, Prop_Send, "m_flMaxspeed");
+	if (cur > 1.0 && LibraryExists("tf2attributes"))
+	{
+		Address a = TF2Attrib_GetByName(client, CS_SPEED_ATTR);
+		float old = a != Address_Null ? TF2Attrib_GetValue(a) : -1.0;
+		float factor = g_cvCsSpeed.FloatValue / cur;
+		if (TF2Attrib_SetByName(client, CS_SPEED_ATTR, (old > 0.0 ? old : 1.0) * factor))
+		{
+			g_bCsSpeedAttr[client] = true;
+			g_flCsSpeedAttrOld[client] = old;
+			TF2Attrib_ClearCache(client);
+		}
+	}
+	ChargeSpeed(client);
+}
+
+void ChargeSpeed(int client)
+{
+	float speed = g_cvCsSpeed.FloatValue;
+	if (GetEntPropFloat(client, Prop_Send, "m_flMaxspeed") < speed)
+		SetEntPropFloat(client, Prop_Send, "m_flMaxspeed", speed);
+}
+
+void ChargeSpeedEnd(int client)
+{
+	if (!g_bCsSpeedAttr[client])
+		return;
+	g_bCsSpeedAttr[client] = false;
+	if (!IsClientInGame(client) || !LibraryExists("tf2attributes"))
+		return;
+	if (g_flCsSpeedAttrOld[client] > 0.0)
+		TF2Attrib_SetByName(client, CS_SPEED_ATTR, g_flCsSpeedAttrOld[client]);
+	else
+		TF2Attrib_RemoveByName(client, CS_SPEED_ATTR);
+	TF2Attrib_ClearCache(client);
 }
 
 /** Server-driven viewmodel sequence (cs_rev_up / cs_rev_down have no stock activity). */
@@ -1475,6 +1581,18 @@ public Action Hook_ChainsawSounds(int clients[MAXPLAYERS], int &numClients, char
 	return Plugin_Continue;
 }
 
+public void OnPluginEnd()
+{
+	for (int i = 1; i <= MaxClients; i++)
+		ChargeSpeedEnd(i);
+}
+
+public void TF2CC_OnRoleCleared(int client, int oldRole)
+{
+	g_flCsChargeEnd[client] = 0.0;
+	ChargeSpeedEnd(client);
+}
+
 public void OnClientDisconnect(int client)
 {
 	StopLoopSounds(client);
@@ -1482,6 +1600,7 @@ public void OnClientDisconnect(int client)
 	g_iCsWeapon[client] = INVALID_ENT_REFERENCE;
 	g_flCsChargeEnd[client] = 0.0;
 	g_flCsChargeReady[client] = 0.0;
+	ChargeSpeedEnd(client);
 	g_bCsDing[client] = false;
 	g_sCsFireSound[client][0] = '\0';
 }

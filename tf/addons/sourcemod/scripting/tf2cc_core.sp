@@ -1645,6 +1645,18 @@ public Action Listener_JoinClass(int client, const char[] command, int argc)
 	char arg[32];
 	GetCmdArg(1, arg, sizeof(arg));
 
+	// "joinclass mercenary" / "joinclass civilian" (and merc/civ) pick the role directly,
+	// like !merc / !civilian (TF2 itself would reject them as invalid class names).
+	if (StrEqual(arg, "merc", false))
+		strcopy(arg, sizeof(arg), "mercenary");
+	else if (StrEqual(arg, "civ", false))
+		strcopy(arg, sizeof(arg), "civilian");
+	if (FindRoleByKey(arg) != TF2CC_ROLE_NONE)
+	{
+		HandleClassArg(client, arg);
+		return Plugin_Handled;
+	}
+
 	if ((StrEqual(arg, "random", false) || StrEqual(arg, "auto", false)) && g_cvRandomMenu.BoolValue
 		&& g_Roles != null && g_Roles.Length > 0 && GetClientTeam(client) >= 2)
 	{

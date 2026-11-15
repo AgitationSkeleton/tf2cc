@@ -63,6 +63,8 @@ float g_flNextTaunt[MAXPLAYERS + 1];
 float g_flTauntYaw[MAXPLAYERS + 1];
 float g_flTauntStart[MAXPLAYERS + 1];
 float g_flTauntLen[MAXPLAYERS + 1];
+float g_flCycleIn[MAXPLAYERS + 1];    // part of the sequence the clone shows (TauntWindow)
+float g_flCycleOut[MAXPLAYERS + 1];
 bool g_bFlexClone[MAXPLAYERS + 1];
 ArrayList g_aHidden[MAXPLAYERS + 1];   // wearables this taunt hid (restore only those)
 
@@ -140,6 +142,7 @@ public void OnPluginEnd()
 }
 
 public void OnClientDisconnect(int client) { EndTaunt(client); }
+public void OnClientPutInServer(int client) { g_flNextTaunt[client] = 0.0; }
 public void TF2CC_OnRoleCleared(int client, int oldRole) { EndTaunt(client); }
 public void Event_Death(Event event, const char[] name, bool dontBroadcast)
 {
@@ -153,8 +156,14 @@ public Action Listener_Taunt(int client, const char[] command, int argc)
 	int role = TF2CC_IsValidClient(client) ? TF2CC_GetRole(client) : TF2CC_ROLE_NONE;
 	if (role == TF2CC_ROLE_NONE)
 		return Plugin_Continue;
+	// Game time restarts at every map change while connected players keep their
+	// slot: a cooldown set late on the previous map would otherwise block taunts
+	// for about as long as that map ran. No real cooldown exceeds a taunt + 1 s.
+	float now = GetGameTime();
+	if (g_flNextTaunt[client] - now > 30.0)
+		g_flNextTaunt[client] = 0.0;
 	if (!g_cvEnabled.BoolValue || !IsPlayerAlive(client) || IsTaunting(client)
-		|| GetGameTime() < g_flNextTaunt[client] || !(GetEntityFlags(client) & FL_ONGROUND))
+		|| now < g_flNextTaunt[client] || !(GetEntityFlags(client) & FL_ONGROUND))
 		return Plugin_Handled;
 
 	// OF picks the taunt by held weapon (talker tf.txt): roles.cfg "weapon_taunts".
@@ -244,6 +253,9 @@ void StartTaunt(int client, const char[] sequence, float duration, const char[] 
 		g_bFlexClone[client] = HasEntProp(prop, Prop_Send, "m_viewtarget");
 		g_flTauntStart[client] = GetGameTime();
 		g_flTauntLen[client] = duration;
+		TauntWindow(client, sequence, g_flCycleIn[client], g_flCycleOut[client]);
+		if (g_bFlexClone[client])
+			SetEntPropFloat(prop, Prop_Data, "m_flCycle", g_flCycleIn[client]);
 		if (g_bFlexClone[client])
 		{
 			// Eyes: a flex entity aims its eyeballs at m_viewtarget (prop_dynamic
@@ -265,8 +277,14 @@ void StartTaunt(int client, const char[] sequence, float duration, const char[] 
 	g_bPlayerMode[client] = playerMode;
 	g_bTaunting[client] = true;
 	SetWearablesHidden(client, true);   // custom world-model wearables ride the player
-	SetEntityMoveType(client, MOVETYPE_NONE);
+	// Like stock taunts only input is locked (OnPlayerRunCmd): no MOVETYPE_NONE,
+	// so gravity, moving ground (m_hGroundEntity / m_vecBaseVelocity) and
+	// platforms still carry the player. A grounded player stops walking.
 	// Networked and predicted: the client stops predicting shots too.
+	// Clone: the taunt ends with the sequence's last upright frame (TauntWindow),
+	// where a scene would start blending back; the player model takes over.
+	if (!playerMode && g_flCycleOut[client] < 1.0)
+		duration *= g_flCycleOut[client];
 	float until = GetGameTime() + duration;
 	SetEntPropFloat(client, Prop_Send, "m_flNextAttack", until);
 	if (weapon > MaxClients)
@@ -274,7 +292,16 @@ void StartTaunt(int client, const char[] sequence, float duration, const char[] 
 		SetEntPropFloat(weapon, Prop_Send, "m_flNextPrimaryAttack", until);
 		SetEntPropFloat(weapon, Prop_Send, "m_flNextSecondaryAttack", until);
 	}
-	TeleportEntity(client, NULL_VECTOR, NULL_VECTOR, view_as<float>({ 0.0, 0.0, 0.0 }));
+	if (GetEntPropEnt(client, Prop_Send, "m_hGroundEntity") != -1)
+	{
+		// Drop only the walking velocity (relative to the ground); a falling or
+		// jumping player keeps his momentum and lands normally.
+		float v[3];
+		GetEntPropVector(client, Prop_Data, "m_vecVelocity", v);
+		v[0] = 0.0;
+		v[1] = 0.0;
+		TeleportEntity(client, NULL_VECTOR, NULL_VECTOR, v);
+	}
 	SetVariantInt(1);
 	AcceptEntityInput(client, "SetForcedTauntCam");
 
@@ -324,6 +351,7 @@ public void OnMapStart()
 		g_bPlayerMode[i] = false;
 		g_iProp[i] = INVALID_ENT_REFERENCE;
 		g_hEndTimer[i] = null;   // TIMER_FLAG_NO_MAPCHANGE timers are already gone
+		g_flNextTaunt[i] = 0.0;  // game time restarts with the map
 	}
 }
 
@@ -334,7 +362,10 @@ void EndTaunt(int client)
 	g_iProp[client] = INVALID_ENT_REFERENCE;
 	bool was = g_bTaunting[client];
 	g_bTaunting[client] = false;
-	if (prop <= 0 || !was)
+	// Restore the player even when the clone is already gone (a round restart
+	// removes it): returning early left them invisible, frozen in the taunt
+	// camera and with their wearables hidden.
+	if (!was)
 		return;
 	if (g_bPlayerMode[client])
 	{
@@ -438,16 +469,33 @@ public void OnGameFrame()
 	float now = GetGameTime();
 	for (int i = 1; i <= MaxClients; i++)
 	{
-		if (!g_bTaunting[i] || !g_bFlexClone[i] || g_bPlayerMode[i])
+		if (!g_bTaunting[i] || g_bPlayerMode[i])
 			continue;
 		int prop = EntRefToEntIndex(g_iProp[i]);
 		if (prop <= MaxClients)
 			continue;
+		// The player still falls and rides platforms while taunting (only input
+		// is locked): keep the clone on the player's current origin.
+		if (IsClientInGame(i))
+		{
+			float pos[3];
+			GetClientAbsOrigin(i, pos);
+			TeleportEntity(prop, pos, NULL_VECTOR, NULL_VECTOR);
+		}
+		if (!g_bFlexClone[i])
+			continue;
+		// The taunt keeps its own timeline (voice lines, the Bond shot and model
+		// events are timed against it); only the shown frame is held inside the
+		// sequence's window, so the blend-in/out frames are never drawn.
 		float cycle = g_flTauntLen[i] > 0.0 ? (now - g_flTauntStart[i]) / g_flTauntLen[i] : 1.0;
-		if (cycle > 0.999)
-			cycle = 0.999;
+		if (cycle < g_flCycleIn[i])
+			cycle = g_flCycleIn[i];
+		if (cycle > g_flCycleOut[i])
+			cycle = g_flCycleOut[i];
 		SetEntPropFloat(prop, Prop_Send, "m_flCycle", cycle);
-		SetEntPropFloat(prop, Prop_Send, "m_flAnimTime", now);
+		// m_flAnimTime is networked as an int: the Prop_Send write threw every
+		// frame and aborted the loop before any later taunting player.
+		SetEntPropFloat(prop, Prop_Data, "m_flAnimTime", now);
 		SetEntPropFloat(prop, Prop_Send, "m_flPlaybackRate", 0.0);
 	}
 }
@@ -534,6 +582,50 @@ int CreateTauntActor(const char[] model, const char[] sequence, int skin)
 	SetVariantString(sequence);
 	AcceptEntityInput(prop, "SetAnimation");
 	return prop;
+}
+
+/**
+ * OF/TF2C (and stock) taunt sequences are made to be blended in and out by a
+ * scene: their first and last few percent ramp from a collapsed pose at the
+ * model origin (the player lying on his back in the floor) up to the taunt.
+ * Measured on the test server with VScript GetBoneOrigin(bip_head), head
+ * height over the origin: Merc taunt01 0 at cycle 0, 72 by 0.05, 68 at 0.89,
+ * 0 at 1.0; every Merc and Civilian taunt has the same ramps (lengths differ).
+ * Playing the clone to cycle 0.999 showed that collapse at the end of every
+ * taunt before the player model came back ("sinks to the floor on his back").
+ * roles.cfg "taunt_windows" "seq=in-out;..." gives the upright part of each
+ * sequence; sequences not listed use 0.03-0.97.
+ */
+void TauntWindow(int client, const char[] sequence, float &cin, float &cout)
+{
+	cin = 0.03;
+	cout = 0.97;
+	int role = TF2CC_GetRole(client);
+	char map[1024];
+	if (role == TF2CC_ROLE_NONE || !TF2CC_GetRoleString(role, "taunt_windows", map, sizeof(map)) || !map[0])
+		return;
+	char entries[24][48];
+	int n = ExplodeString(map, ";", entries, sizeof(entries), sizeof(entries[]));
+	for (int i = 0; i < n; i++)
+	{
+		TrimString(entries[i]);
+		int eq = FindCharInString(entries[i], '=');
+		if (eq <= 0)
+			continue;
+		entries[i][eq] = '\0';
+		if (!StrEqual(entries[i], sequence, false))
+			continue;
+		char p[2][16];
+		if (ExplodeString(entries[i][eq + 1], "-", p, sizeof(p), sizeof(p[])) != 2)
+			return;
+		float a = StringToFloat(p[0]), b = StringToFloat(p[1]);
+		if (a >= 0.0 && b <= 1.0 && a < b)
+		{
+			cin = a;
+			cout = b > 0.999 ? 0.999 : b;
+		}
+		return;
+	}
 }
 
 /** "weapon_taunts" "id=seq:secs[:concept[:delay]];id=...;default=..." for the active weapon. */
