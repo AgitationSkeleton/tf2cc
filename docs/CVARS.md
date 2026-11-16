@@ -50,6 +50,7 @@ Config file: `cfg/sourcemod/tf2cc_core.cfg`
 | `tf2cc_downloads` | `1` | 0 .. 1 | Add every file in configs/tf2cc/downloads.txt (generated asset manifest) to the downloads table. |
 | `tf2cc_no_fall_damage` | (empty) |  | Extra players without fall damage (beyond roles.cfg fall_damage 0): comma list of all, roles, role keys, class names. |
 | `tf2cc_debug` | `0` | 0 .. 1 | Verbose logging to logs/tf2cc.log. |
+| `tf2cc_exempt_autodetect` | `1` | 0 .. 1 | At map start, also exempt maps whose BSP pakfile carries VScript files under a 'mercenary' path (maps that simulate the Mercenary themselves). configs/tf2cc/exempt_maps.txt is always used. |
 | `tf2cc_bot_reevaluate_guard` | `1` | 0 .. 1 | While role bots exist, temporarily set tf_bot_reevaluate_class_in_spawnroom 0 (restored afterwards) so they don't suicide-loop in spawn. |
 
 | Command | Access | What it does |
@@ -62,6 +63,7 @@ Config file: `cfg/sourcemod/tf2cc_core.cfg`
 | `sm_tf2cc_reload` | admin: config | Reload roles.cfg. |
 | `sm_tf2cc_selfcheck` | admin: generic | Check what tf2cc depends on after a TF2/SourceMod/TF2Attributes update (netprops, respawn hook, TF2Attributes). |
 | `sm_tf2cc_test_nohook` | admin: root | sm_tf2cc_test_nohook <0\|1> - TESTING: run class-10 transitions through the fallback path as if the ForceRespawn offset were missing. |
+| `sm_tf2cc_exempt` | admin: config | Show whether this map is exempt from custom classes; sm_tf2cc_exempt reload re-reads exempt_maps.txt. |
 | `sm_tf2cc_status` | admin: generic | Show role state of every player. |
 | `sm_tf2cc_setrole` | admin: slay | sm_tf2cc_setrole <target> <role\|none> - bots stay pinned to it until they leave. |
 

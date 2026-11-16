@@ -38,6 +38,8 @@ public Plugin myinfo =
 #define CONFIG_ROLES "configs/tf2cc/roles.cfg"
 #define LOG_FILE     "logs/tf2cc.log"
 #define CONFIG_DOWNLOADS "configs/tf2cc/downloads.txt"
+#define CONFIG_EXEMPT "configs/tf2cc/exempt_maps.txt"
+#define EXEMPT_MSG "Custom classes are off on this map: it has its own Mercenary."
 
 enum struct RoleDef
 {
@@ -110,6 +112,9 @@ GlobalForward g_fwdVoicePre;
 GlobalForward g_fwdVoice;
 
 char g_sLogPath[PLATFORM_MAX_PATH];
+bool g_bMapExempt;              // this map runs its own Mercenary (exempt_maps.txt / auto-detect): no roles
+char g_sExemptWhy[PLATFORM_MAX_PATH];
+ConVar g_cvExemptAuto;
 
 static const char g_sStockClassNames[][] =
 {
@@ -180,6 +185,7 @@ public void OnPluginStart()
 	g_cvDownloads = CreateConVar("tf2cc_downloads", "1", "Add every file in configs/tf2cc/downloads.txt (generated asset manifest) to the downloads table.", _, true, 0.0, true, 1.0);
 	g_cvNoFallScope = CreateConVar("tf2cc_no_fall_damage", "", "Extra players without fall damage (beyond roles.cfg fall_damage 0): comma list of all, roles, role keys, class names.");
 	g_cvDebug = CreateConVar("tf2cc_debug", "0", "Verbose logging to logs/tf2cc.log.", _, true, 0.0, true, 1.0);
+	g_cvExemptAuto = CreateConVar("tf2cc_exempt_autodetect", "1", "At map start, also exempt maps whose BSP pakfile carries VScript files under a 'mercenary' path (maps that simulate the Mercenary themselves). configs/tf2cc/exempt_maps.txt is always used.", _, true, 0.0, true, 1.0);
 	AutoExecConfig(true, "tf2cc_core");
 
 	RegConsoleCmd("sm_class", Cmd_Class, "Open the custom class menu.");
@@ -191,6 +197,7 @@ public void OnPluginStart()
 	RegAdminCmd("sm_tf2cc_reload", Cmd_Reload, ADMFLAG_CONFIG, "Reload roles.cfg.");
 	RegAdminCmd("sm_tf2cc_selfcheck", Cmd_SelfCheck, ADMFLAG_GENERIC, "Check what tf2cc depends on after a TF2/SourceMod/TF2Attributes update (netprops, respawn hook, TF2Attributes).");
 	RegAdminCmd("sm_tf2cc_test_nohook", Cmd_TestNoHook, ADMFLAG_ROOT, "sm_tf2cc_test_nohook <0|1> - TESTING: run class-10 transitions through the fallback path as if the ForceRespawn offset were missing.");
+	RegAdminCmd("sm_tf2cc_exempt", Cmd_Exempt, ADMFLAG_CONFIG, "Show whether this map is exempt from custom classes; sm_tf2cc_exempt reload re-reads exempt_maps.txt.");
 	RegAdminCmd("sm_tf2cc_status", Cmd_Status, ADMFLAG_GENERIC, "Show role state of every player.");
 	RegAdminCmd("sm_tf2cc_setrole", Cmd_SetRoleAdmin, ADMFLAG_SLAY, "sm_tf2cc_setrole <target> <role|none> - bots stay pinned to it until they leave.");
 
@@ -267,6 +274,7 @@ public void OnPluginEnd()
 
 public void OnMapStart()
 {
+	UpdateMapExempt();
 	PrecacheRoleModels();
 	HookRespawnRooms();
 	HookPlayerResource();
@@ -584,6 +592,16 @@ public MRESReturn Hook_ForceRespawnPre(int client)
 	if (!g_bForceRespawnHook || !g_cvEnabled.BoolValue || !IsClientInGame(client))
 		return MRES_Ignored;
 
+	if (g_bMapExempt)
+	{
+		// The map runs its own Mercenary: spawn the stock class. The role
+		// selection (g_iPending) is kept and applies again on the next map.
+		g_bJustRolled[client] = false;
+		if (g_iPending[client] != TF2CC_ROLE_NONE || g_iRole[client] != TF2CC_ROLE_NONE)
+			SetDesiredClass(client, SafeClass(client));
+		return MRES_Ignored;
+	}
+
 	if (g_bRandomEachLife[client] && !g_bJustRolled[client])
 		RollRandom(client);
 	else if (IsFakeClient(client) && !g_bJustRolled[client])
@@ -649,7 +667,7 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 		}
 
 		// Fallback path when the ForceRespawn hook is unavailable: convert now.
-		if (!g_bForceRespawnHook && g_iPending[client] != TF2CC_ROLE_NONE && g_cvEnabled.BoolValue)
+		if (!g_bForceRespawnHook && !g_bMapExempt && g_iPending[client] != TF2CC_ROLE_NONE && g_cvEnabled.BoolValue)
 			FallbackConvert(client);
 		return;
 	}
@@ -658,8 +676,8 @@ public void Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast
 		return;
 
 	int want = g_iPending[client];
-	if (want == TF2CC_ROLE_NONE)
-		return; // class 10 owned by something else; leave it alone
+	if (want == TF2CC_ROLE_NONE || g_bMapExempt)
+		return; // class 10 owned by something else (or the map's own): leave it alone
 
 	int old = g_iRole[client];
 	if (old != TF2CC_ROLE_NONE && old != want)
@@ -1036,6 +1054,11 @@ bool IsRoleEligible(int client, int role, bool quiet = true, char[] reason = "",
 	if (!g_cvEnabled.BoolValue || !GetRoleDef(role, def))
 	{
 		if (reasonLen) strcopy(reason, reasonLen, "Custom classes are disabled.");
+		return false;
+	}
+	if (g_bMapExempt)
+	{
+		if (reasonLen) strcopy(reason, reasonLen, EXEMPT_MSG);
 		return false;
 	}
 	if (IsFakeClient(client) && !def.allowBots)
@@ -1503,6 +1526,8 @@ public Action Cmd_Class(int client, int args)
 {
 	if (!client)
 		return Plugin_Handled;
+	if (ReplyExempt(client))
+		return Plugin_Handled;
 	if (args >= 1)
 	{
 		char arg[32];
@@ -1516,14 +1541,14 @@ public Action Cmd_Class(int client, int args)
 
 public Action Cmd_Merc(int client, int args)
 {
-	if (client)
+	if (client && !ReplyExempt(client))
 		HandleClassArg(client, "mercenary");
 	return Plugin_Handled;
 }
 
 public Action Cmd_Civ(int client, int args)
 {
-	if (client)
+	if (client && !ReplyExempt(client))
 		HandleClassArg(client, "civilian");
 	return Plugin_Handled;
 }
@@ -1653,9 +1678,13 @@ public Action Listener_JoinClass(int client, const char[] command, int argc)
 		strcopy(arg, sizeof(arg), "civilian");
 	if (FindRoleByKey(arg) != TF2CC_ROLE_NONE)
 	{
-		HandleClassArg(client, arg);
+		if (!ReplyExempt(client))
+			HandleClassArg(client, arg);
 		return Plugin_Handled;
 	}
+
+	if (g_bMapExempt)
+		return Plugin_Continue;   // stock class menu (random/auto included) on exempt maps
 
 	if ((StrEqual(arg, "random", false) || StrEqual(arg, "auto", false)) && g_cvRandomMenu.BoolValue
 		&& g_Roles != null && g_Roles.Length > 0 && GetClientTeam(client) >= 2)
@@ -1708,6 +1737,220 @@ public Action Listener_VoiceMenu(int client, const char[] command, int argc)
 	Call_PushCell(item);
 	Call_Finish();
 	// Stock voice rules have no class-10 responses; the voice module speaks.
+	return Plugin_Handled;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Exempt maps: maps that simulate the Mercenary themselves through VScript  */
+/* (Open Fortress style dm_ / gg_ / gungame_ ports: ffa/mercenary,           */
+/* deathmatch/dm_mercenary, open_deathmatch/mercenary, gungame/mercenary).   */
+/* While one is loaded no role is applied: commands reply, bots never roll,  */
+/* role players respawn as their stock class and every module's role hooks   */
+/* stay idle (they all key on TF2CC_GetRole). Selections are kept and apply  */
+/* again on the next normal map.                                             */
+/* ------------------------------------------------------------------------- */
+bool ReplyExempt(int client)
+{
+	if (!g_bMapExempt)
+		return false;
+	PrintToChat(client, "\x04[TF2CC]\x01 %s", EXEMPT_MSG);
+	return true;
+}
+
+void UpdateMapExempt()
+{
+	char map[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof(map));
+	GetMapDisplayName(map, map, sizeof(map));
+	bool was = g_bMapExempt;
+	g_bMapExempt = false;
+	g_sExemptWhy[0] = '\0';
+	char pattern[PLATFORM_MAX_PATH];
+	if (ExemptListMatch(map, pattern, sizeof(pattern)))
+	{
+		g_bMapExempt = true;
+		FormatEx(g_sExemptWhy, sizeof(g_sExemptWhy), "exempt_maps.txt '%s'", pattern);
+	}
+	else if (g_cvExemptAuto.BoolValue)
+	{
+		char hit[PLATFORM_MAX_PATH];
+		int r = BspHasMercScripts(map, hit, sizeof(hit));
+		if (r == 1)
+		{
+			g_bMapExempt = true;
+			FormatEx(g_sExemptWhy, sizeof(g_sExemptWhy), "auto-detected (pakfile %s)", hit);
+		}
+		else if (r < 0)
+			LogToFileEx(g_sLogPath, "exempt check: %s pakfile not readable (%s); not exempt", map, hit);
+	}
+	if (g_bMapExempt)
+	{
+		LogToFileEx(g_sLogPath, "map %s: custom classes OFF, %s", map, g_sExemptWhy);
+		LogMessage("tf2cc: custom classes are off on %s (%s)", map, g_sExemptWhy);
+	}
+	else if (was)
+		LogToFileEx(g_sLogPath, "map %s: custom classes back on", map);
+	if (g_bMapExempt)
+		ReleaseRolePlayers();
+}
+
+/** Clear active roles (late load / list reload mid-map); a map change respawns everyone anyway. */
+void ReleaseRolePlayers()
+{
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || g_iRole[client] == TF2CC_ROLE_NONE)
+			continue;
+		int old = g_iRole[client];
+		ClearPresentation(client);
+		g_iRole[client] = TF2CC_ROLE_NONE;
+		FireCleared(client, old);
+		SetDesiredClass(client, SafeClass(client));
+		if (IsPlayerAlive(client) && view_as<int>(TF2_GetPlayerClass(client)) == TF2CC_CLASS_INDEX)
+			TF2_RespawnPlayer(client);
+	}
+}
+
+/** exempt_maps.txt: one map per line, exact name or prefix with a trailing '*'; // and # comments. */
+bool ExemptListMatch(const char[] map, char[] matched, int maxlen)
+{
+	char path[PLATFORM_MAX_PATH];
+	BuildPath(Path_SM, path, sizeof(path), CONFIG_EXEMPT);
+	File f = OpenFile(path, "r");
+	if (f == null)
+		return false;
+	char line[PLATFORM_MAX_PATH];
+	bool found = false;
+	while (!found && f.ReadLine(line, sizeof(line)))
+	{
+		int c = StrContains(line, "//");
+		if (c >= 0) line[c] = '\0';
+		c = FindCharInString(line, '#');
+		if (c >= 0) line[c] = '\0';
+		TrimString(line);
+		int len = strlen(line);
+		if (!len)
+			continue;
+		if (line[len - 1] == '*')
+		{
+			line[len - 1] = '\0';
+			found = line[0] != '\0' && StrContains(map, line, false) == 0;
+			if (found) StrCat(line, sizeof(line), "*");
+		}
+		else
+			found = StrEqual(map, line, false);
+		if (found)
+			strcopy(matched, maxlen, line);
+	}
+	delete f;
+	return found;
+}
+
+/**
+ * BSP pakfile (lump 40, an uncompressed-directory zip): look for a VScript file
+ * under a "mercenary" path. Only the zip central directory is read (names are
+ * stored uncompressed even when members are LZMA), a few KB per map.
+ * 1 = found (hit = name), 0 = not found, -1 = unreadable (hit = reason).
+ */
+int BspHasMercScripts(const char[] map, char[] hit, int maxlen)
+{
+	char path[PLATFORM_MAX_PATH];
+	FormatEx(path, sizeof(path), "maps/%s.bsp", map);
+	File f = OpenFile(path, "rb", true, NULL_STRING);
+	if (f == null)
+	{
+		strcopy(hit, maxlen, "open failed");
+		return -1;
+	}
+	int ident, ofs, len;
+	f.ReadInt32(ident);
+	if (ident != 0x50534256)   // "VBSP"
+	{
+		delete f;
+		strcopy(hit, maxlen, "not VBSP");
+		return -1;
+	}
+	f.Seek(8 + 40 * 16, SEEK_SET);
+	f.ReadInt32(ofs);
+	f.ReadInt32(len);
+	if (ofs <= 0 || len < 22)
+	{
+		delete f;
+		return 0;   // no pakfile
+	}
+	// End of central directory: the last 22 bytes when there is no zip comment
+	// (Valve writes none); otherwise scan back up to 1 KB for its signature.
+	int eocd = -1;
+	int back = len < 1024 + 22 ? len : 1024 + 22;
+	int buf[1046];
+	f.Seek(ofs + len - back, SEEK_SET);
+	int got = f.Read(buf, back, 1);
+	for (int i = got - 22; i >= 0; i--)
+	{
+		if (buf[i] == 0x50 && buf[i + 1] == 0x4B && buf[i + 2] == 0x05 && buf[i + 3] == 0x06)
+		{
+			eocd = i;
+			break;
+		}
+	}
+	if (eocd < 0)
+	{
+		delete f;
+		strcopy(hit, maxlen, "no zip directory");
+		return -1;
+	}
+	int entries = buf[eocd + 10] | (buf[eocd + 11] << 8);
+	int cdofs = buf[eocd + 16] | (buf[eocd + 17] << 8) | (buf[eocd + 18] << 16) | (buf[eocd + 19] << 24);
+	if (cdofs < 0 || cdofs >= len)
+	{
+		delete f;
+		strcopy(hit, maxlen, "bad directory offset");
+		return -1;
+	}
+	f.Seek(ofs + cdofs, SEEK_SET);
+	int hdr[46];
+	char name[PLATFORM_MAX_PATH];
+	int result = 0;
+	for (int e = 0; e < entries && result == 0; e++)
+	{
+		if (f.Read(hdr, 46, 1) != 46 || hdr[0] != 0x50 || hdr[1] != 0x4B || hdr[2] != 0x01 || hdr[3] != 0x02)
+		{
+			strcopy(hit, maxlen, "bad directory entry");
+			result = -1;
+			break;
+		}
+		int nlen = hdr[28] | (hdr[29] << 8);
+		int skip = (hdr[30] | (hdr[31] << 8)) + (hdr[32] | (hdr[33] << 8));
+		int keep = nlen < sizeof(name) - 1 ? nlen : sizeof(name) - 1;
+		f.ReadString(name, keep + 1, keep);
+		name[keep] = '\0';
+		if (nlen > keep)
+			skip += nlen - keep;
+		if (skip)
+			f.Seek(skip, SEEK_CUR);
+		ReplaceString(name, sizeof(name), "\\", "/");
+		if (StrContains(name, "scripts/vscripts/", false) == 0 && StrContains(name, "mercenary", false) > 0
+			&& (StrContains(name, ".nut", false) > 0 || StrContains(name, ".nuc", false) > 0))
+		{
+			strcopy(hit, maxlen, name);
+			result = 1;
+		}
+	}
+	delete f;
+	return result;
+}
+
+public Action Cmd_Exempt(int client, int args)
+{
+	char arg[16];
+	GetCmdArg(1, arg, sizeof(arg));
+	if (StrEqual(arg, "reload", false))
+		UpdateMapExempt();
+	char map[PLATFORM_MAX_PATH];
+	GetCurrentMap(map, sizeof(map));
+	GetMapDisplayName(map, map, sizeof(map));
+	ReplyToCommand(client, "[TF2CC] %s: custom classes %s%s%s", map, g_bMapExempt ? "OFF (" : "on",
+		g_bMapExempt ? g_sExemptWhy : "", g_bMapExempt ? ")" : "");
 	return Plugin_Handled;
 }
 
@@ -1765,17 +2008,24 @@ public Action Cmd_SetRoleAdmin(int client, int args)
 		ReplyToTargetError(client, n);
 		return Plugin_Handled;
 	}
+	int applied = 0;
 	for (int i = 0; i < n; i++)
 	{
 		// An admin choice pins a bot: RollBot would re-roll it on the next respawn.
 		if (IsFakeClient(targets[i]))
 			g_bFixedClassBot[targets[i]] = true;
 		if (role == TF2CC_ROLE_NONE)
+		{
 			JoinStockClass(targets[i], SafeClass(targets[i]));
-		else
-			SelectRole(targets[i], role, true);
+			applied++;
+		}
+		else if (SelectRole(targets[i], role, true))
+			applied++;
 	}
-	ReplyToCommand(client, "[TF2CC] Applied to %d player(s).", n);
+	if (applied < n && g_bMapExempt)
+		ReplyToCommand(client, "[TF2CC] Applied to %d of %d player(s): %s", applied, n, EXEMPT_MSG);
+	else
+		ReplyToCommand(client, "[TF2CC] Applied to %d of %d player(s).", applied, n);
 	return Plugin_Handled;
 }
 

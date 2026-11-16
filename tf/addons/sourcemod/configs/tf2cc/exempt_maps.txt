@@ -1,0 +1,43 @@
+// tf2cc: maps where custom classes are OFF because the map simulates the
+// Mercenary itself through VScript (Open Fortress style deathmatch / gun game
+// ports). While one is loaded tf2cc applies no roles: !merc / !civilian /
+// !classes reply, bots never roll a role, role players spawn as their stock
+// class; their selection applies again on the next normal map.
+//
+// One map per line: an exact map name, or a prefix ending in '*'.
+// '//' and '#' start comments. tf2cc_exempt_autodetect 1 (default) also
+// exempts unlisted maps whose BSP pakfile ships VScript files under a
+// "mercenary" path; logs/tf2cc.log records every decision.
+//
+// Seeded from a survey of the Server1-HP tf2 (VScript Maps) folder, 2026-11-15:
+// each listed map packs scripts/vscripts/.../mercenary/ (ffa, deathmatch,
+// open_deathmatch or gungame frameworks) with SetCustomModel(WithClassAnimations)
+// of models/player/merc*.
+
+// ffa / deathmatch framework (scripts/vscripts/deathmatch/deathmatch/dm_mercenary.nut)
+dm_badworks*
+dm_deadlock*
+dm_forgecall*
+dm_hydro*
+dm_poolparty*
+dm_powerdown*
+dm_razorpoint*
+// open_deathmatch framework (scripts/vscripts/open_deathmatch/mercenary/character.nut)
+// (not dm_crossfire* : plain dm_crossfire has no scripts)
+dm_crossfire_a5a
+dm_crossfire_72h_a1
+
+// gun game (scripts/vscripts/ffa/mercenary/ or gungame/.../mercenary/)
+gg_badworks*
+gg_deadlock*
+gg_doublecross*
+gg_forgecall*
+gg_harvest*
+gg_hydro*
+gg_mann_town*
+gg_poolparty*
+gg_powerdown*
+gg_razorpoint*
+gungame_2fort*
+gungame_crossfire*
+gungame_marine*
