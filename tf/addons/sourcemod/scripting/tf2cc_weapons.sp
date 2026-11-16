@@ -171,6 +171,8 @@ enum struct SlotRecord
 }
 
 SlotRecord g_Inv[MAXPLAYERS + 1][SLOT_COUNT];
+float g_flChargeReleaseSeen[MAXPLAYERS + 1];
+float g_flLastDrain[MAXPLAYERS + 1];   // last Timer_Medigun tick with the role player's own uber running
 ItemSnapshot g_Snap[MAXPLAYERS + 1][SLOT_COUNT];   // stock item look per slot (GiveStockItemSnap)
 int g_iArmsWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 int g_iWeaponWearable[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
@@ -1676,11 +1678,22 @@ public void OnEntityDestroyed(int entity)
 }
 
 /** Put a remembered medigun charge back on the slot's current entity. */
-void RestoreCharge(int client, int slot, float charge)
+void RestoreCharge(int client, int slot, float charge, bool release)
 {
 	int ent = EntRefToEntIndex(g_Inv[client][slot].entRef);
 	if (charge > 0.0 && ent > MaxClients && HasEntProp(ent, Prop_Send, "m_flChargeLevel"))
+	{
 		SetEntPropFloat(ent, Prop_Send, "m_flChargeLevel", charge);
+		// A resupply mid-uber keeps it going (stock keeps the same medigun entity;
+		// here it is a fresh one): the release flag drains it and Timer_Medigun
+		// re-applies the condition.
+		if (release && HasEntProp(ent, Prop_Send, "m_bChargeRelease"))
+		{
+			SetEntProp(ent, Prop_Send, "m_bChargeRelease", 1);
+			if (g_cvMedigunUber.BoolValue)
+				ApplyMedigunCharge(client, ent, -1);
+		}
+	}
 }
 
 /** Remove the occupant of a slot through the game's own RemovePlayerItem. */
@@ -1791,6 +1804,17 @@ public void Hook_WeaponSwitchPost(int client, int weapon)
 	g_flForceDonorSync[client] = GetGameTime() + 1.0;
 	if (TF2CC_GetRole(client) == TF2CC_ROLE_NONE || !IsRoleClass(client))
 		return;
+
+	// CWeaponMedigun::Holster recalculates charge effects at once, and a role
+	// player provides none (GetChargeEffectBeingProvided is Medic-only), so his
+	// own released charge was dropped until the next Timer_Medigun tick: put it
+	// back in the same tick so the uber skin does not flicker on the swap.
+	if (g_cvMedigunUber.BoolValue && IsPlayerAlive(client))
+	{
+		int held = HolsteredReleasingMedigun(client);
+		if (held > MaxClients)
+			ApplyMedigunCharge(client, held, -1);
+	}
 
 	// Save the reserve of the weapon we left, load the reserve of the new one
 	// (two Mercenary weapons may share an ammo type).
@@ -1906,6 +1930,9 @@ public void Frame_Rematerialize(int userid)
 		int itemdef = g_Inv[client][s].itemdef;
 		// Same tick as ValidateWeapons: the removed entity is still readable.
 		float charge = g_Inv[client][s].charge;
+		// CWeaponMedigun::UpdateOnRemove clears m_bChargeRelease before the
+		// entity can be read, so an uber in progress is taken from Timer_Medigun.
+		bool release = GetGameTime() - g_flChargeReleaseSeen[client] < 0.3;
 		if (ent > MaxClients && HasEntProp(ent, Prop_Send, "m_flChargeLevel"))
 			charge = GetEntPropFloat(ent, Prop_Send, "m_flChargeLevel");
 		g_Inv[client][s].entRef = INVALID_ENT_REFERENCE;
@@ -1918,7 +1945,7 @@ public void Frame_Rematerialize(int userid)
 			keep = g_Snap[client][s];
 			GiveStockItemSnap(client, itemdef, 0, -1, -1, false, keep);
 		}
-		RestoreCharge(client, s, charge);
+		RestoreCharge(client, s, charge, release);
 		any = true;
 	}
 	// Resupply restores the default loadout (DM pistol, crowbar) where a slot is
@@ -3281,11 +3308,79 @@ public Action Timer_Medigun(Handle timer)
 					target = GetEntPropEnt(w, Prop_Send, "m_hHealingTarget");
 			}
 		}
+		if (medigun > MaxClients && release)
+		{
+			g_flChargeReleaseSeen[client] = GetGameTime();
+			if (!DrainActiveCharge(client, medigun))
+				release = false;
+		}
+		g_flLastDrain[client] = GetGameTime();
 		if (medigun > MaxClients && release && g_cvMedigunUber.BoolValue)
 			ApplyMedigunCharge(client, medigun, target);
+		else if (medigun <= MaxClients && g_cvMedigunUber.BoolValue && IsClientInGame(client) && IsPlayerAlive(client)
+			&& TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+		{
+			// Switched away mid-charge (a weapon switch also swaps the model variant):
+			// a holstered medigun keeps draining (CWeaponMedigun::ItemHolsterFrame ->
+			// DrainCharge), so the Merc keeps his own charge until it runs out. Only
+			// the patient loses it, as with a stock Medic's holstered medigun.
+			int held = HolsteredReleasingMedigun(client);
+			if (held > MaxClients)
+			{
+				g_flChargeReleaseSeen[client] = GetGameTime();
+				ApplyMedigunCharge(client, held, -1);
+			}
+		}
 		UpdateHealBeam(client, g_cvHealBeam.BoolValue ? target : -1, release);
 	}
 	return Plugin_Continue;
+}
+
+/**
+ * The active medigun of a non-Medic never drains: CWeaponMedigun::DrainCharge
+ * runs from ItemHolsterFrame (holstered) and, for the active one, only from
+ * CTFPlayerShared's "stops the drain hack" block, which is Medic-only. So a
+ * role player's uber lasted as long as he held the medigun. Drain it here like
+ * DrainCharge (weapon_medigun_chargerelease_rate + add_uber_time seconds).
+ * The Vaccinator's chunked charge is left to the game. false = charge ran out.
+ */
+bool DrainActiveCharge(int client, int medigun)
+{
+	float now = GetGameTime();
+	float dt = now - g_flLastDrain[client];
+	if (dt <= 0.0 || dt > 0.25)
+		dt = 0.1;
+	int type = g_bTF2Attributes ? RoundToFloor(TF2Attrib_HookValueFloat(0.0, "set_charge_type", medigun)) : 0;
+	if (type > 2)
+		return true;
+	ConVar rate = FindConVar("weapon_medigun_chargerelease_rate");
+	float uberTime = rate != null ? rate.FloatValue : 8.0;
+	if (g_bTF2Attributes)
+		uberTime = TF2Attrib_HookValueFloat(uberTime, "add_uber_time", client);
+	if (uberTime < 0.5)
+		uberTime = 0.5;
+	float charge = GetEntPropFloat(medigun, Prop_Send, "m_flChargeLevel") - dt / uberTime;
+	if (charge <= 0.0)
+	{
+		SetEntPropFloat(medigun, Prop_Send, "m_flChargeLevel", 0.0);
+		SetEntProp(medigun, Prop_Send, "m_bChargeRelease", 0);
+		return false;
+	}
+	SetEntPropFloat(medigun, Prop_Send, "m_flChargeLevel", charge);
+	return true;
+}
+
+int HolsteredReleasingMedigun(int client)
+{
+	char cls[32];
+	for (int slot = 0; slot < 6; slot++)
+	{
+		int w = GetPlayerWeaponSlot(client, slot);
+		if (w > MaxClients && GetEntityClassname(w, cls, sizeof(cls)) && StrEqual(cls, "tf_weapon_medigun")
+			&& GetEntProp(w, Prop_Send, "m_bChargeRelease"))
+			return w;
+	}
+	return -1;
 }
 
 void ApplyMedigunCharge(int client, int medigun, int target)

@@ -303,7 +303,7 @@ void StartTaunt(int client, const char[] sequence, float duration, const char[] 
 	}
 	else
 	{
-		int skin = GetClientTeam(client) == view_as<int>(TFTeam_Blue) ? 1 : 0;
+		int skin = CloneSkin(client);
 		prop = CreateTauntActor(model, sequence, skin);
 		if (prop == -1)
 			return;
@@ -557,6 +557,16 @@ public Action Timer_TauntVoice(Handle timer, DataPack dp)
  * frame over the taunt's length and hold the last frame (no reference pose
  * between the end of the sequence and the end of the taunt).
  */
+/** Skin the hidden player would draw with: team, +2 while invulnerable (CTFPlayerShared::IsInvulnerable). */
+int CloneSkin(int client)
+{
+	int skin = GetClientTeam(client) == view_as<int>(TFTeam_Blue) ? 1 : 0;
+	if (TF2_IsPlayerInCondition(client, TFCond_Ubercharged) || TF2_IsPlayerInCondition(client, TFCond_UberchargedCanteen)
+		|| TF2_IsPlayerInCondition(client, TFCond_UberchargedOnTakeDamage))
+		skin += 2;
+	return skin;
+}
+
 public void OnGameFrame()
 {
 	float now = GetGameTime();
@@ -574,6 +584,12 @@ public void OnGameFrame()
 			float pos[3];
 			GetClientAbsOrigin(i, pos);
 			TeleportEntity(prop, pos, NULL_VECTOR, NULL_VECTOR);
+			// The hidden player would show the uber skin (C_TFPlayer::GetSkin: team
+			// skin + 2 while invulnerable); the clone is a separate entity, so it
+			// mirrors that every frame, also when the uber starts or ends mid-taunt.
+			int skin = CloneSkin(i);
+			if (HasEntProp(prop, Prop_Send, "m_nSkin") && GetEntProp(prop, Prop_Send, "m_nSkin") != skin)
+				SetEntProp(prop, Prop_Send, "m_nSkin", skin);
 		}
 		if (!g_bFlexClone[i])
 			continue;
