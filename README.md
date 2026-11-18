@@ -20,8 +20,11 @@ unmodified and VAC-secured.
   sounds:
   - melee: Crowbar, Lead Pipe, Combat Knife, Fists/Berserk, Chainsaw;
   - secondary: Pistol and Akimbo Pistols, Revolver, Shotgun, Combat SMG, Tommy Gun;
-  - primary: Super Shotgun, Assault Rifle, Rocket Launcher, Grenade Launcher (China
-    Lake), Dynamite, Nailgun, Gatling Gun, Railgun, Lightning Gun, G.I.B., Saw Ballista.
+  - primary: Super Shotgun, Eternal Shotgun (alt-fire meat hook), Assault Rifle, Rocket
+    Launcher, Quad Launcher, Grenade Launcher (China Lake), Bouncer, Dynamite, Nailgun,
+    Gatling Gun, Railgun, Lightning Gun, G.I.B., Saw Ballista (ricocheting blade).
+- A Phlogistinator picked up from a Pyro works for the Mercenary too: burn damage fills
+  the Mmmph meter and alt-fire activates it.
 - Weapon pickups:
   - weapons drop on death;
   - walking over a weapon picks it up if that slot is empty;
@@ -75,8 +78,10 @@ the Open Fortress original. tf2cc then corrects the rest:
 - stats are set with attributes;
 - sounds are swapped;
 - behaviours stock TF2 can't express are done by the plugin itself: chainsaw sawing,
-  bomblets, the lightning beam, nails, the medkit, Saw Ballista grinding, gatling
-  sounds, and the Civilian aura and boost.
+  bomblets, the lightning beam, nails, the medkit, the Quad Launcher's four-rocket burst
+  and homing, the Bouncer's ricochets, the Eternal Shotgun's meat hook (`tf2cc_hook`), the
+  Saw Ballista's ricocheting blade (`tf2cc_saw`), gatling sounds, the Phlogistinator's
+  Mmmph, and the Civilian aura and boost.
 
 The full explanation is in [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 
@@ -115,6 +120,7 @@ download host:
 3. [docs/CONFIGURATION.md](docs/CONFIGURATION.md): roles, weapons, voice and movement
    config files.
 4. [docs/CVARS.md](docs/CVARS.md): every cvar and command.
+5. [docs/CHANGELOG.md](docs/CHANGELOG.md): what changed recently.
 
 **Requirements:**
 - a 64-bit TF2 dedicated server;
@@ -128,13 +134,13 @@ Tested on SourceMod 1.12.0.7200 with TF2Attributes 1.7.5.
 
 ```
 tf/                                  copy this folder over your server's tf/ folder
-  addons/sourcemod/plugins/tf2cc/    the eight tf2cc plugins (compiled)
+  addons/sourcemod/plugins/tf2cc/    the ten tf2cc plugins (compiled)
   addons/sourcemod/plugins/classicmovement.smx   bunny-hop (fork of mphe's Classic Movement)
   addons/sourcemod/scripting/        complete source code
   addons/sourcemod/configs/tf2cc/    roles, weapons, voice, movement, variants, downloads list
   cfg/sourcemod/                     default Classic Movement settings
   models/ materials/ sound/          client content (also goes on your FastDL)
-docs/                                installation, FastDL, configuration, cvars, internals
+docs/                                installation, FastDL, configuration, cvars, internals, changelog
 tools/make_fastdl.py                 builds the compressed FastDL tree
 THIRD-PARTY/                         licences of bundled third-party code
 ```

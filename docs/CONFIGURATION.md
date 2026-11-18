@@ -42,7 +42,7 @@ model, sounds and stats are layered on top. Safe things to change:
 
 | Key | Meaning |
 |---|---|
-| `enabled` | `0` takes the weapon out of the game. These ship disabled: the MarxVee-only extras (Medkit, Grappling Hook, Hoarder's Stash, Backup Plan, Cash Wad, Chainsaw (Backstab)) and the Quad Launcher, Machine Gun and Flamethrower. |
+| `enabled` | `0` takes the weapon out of the game. These ship disabled: the MarxVee-only extras (Medkit, Grappling Hook, Hoarder's Stash, Backup Plan, Cash Wad, Chainsaw (Backstab)) and the Machine Gun and Flamethrower. |
 | `pack_weight` | How often ammo packs drop this weapon (`0` = never) |
 | `attributes` | TF2 attributes (by name) that set damage, fire rate, clip and so on |
 | `reserve`, `clip` | Ammo amounts |

@@ -118,8 +118,26 @@ and the player's model is swapped to the right copy when they switch weapons.
 | Dynamite, G.I.B. | Bomblets scattered on explosion. Dynamite explodes on impact. The G.I.B. uses energy-blast effects. |
 | Nailgun | Nail projectile model |
 | Lightning Gun | Continuous beam: hit detection, damage, beam effect |
-| Saw Ballista | The blade keeps grinding a target it hits |
+| Quad Launcher | Open Fortress's burst: one press fires four rockets 0.1 s apart (0.5 s between bursts); rockets home on the aim point (alt-fire toggles homing, a ping sounds while it is on); each rocket since the last reload adds 25 to the blast radius; the whole clip reloads in 3.84 s |
+| Bouncer | A grenade on Open Fortress's arc that ricochets off walls keeping 90 % of its speed and explodes on touching an enemy or after 2 s, at full damage |
+| Phlogistinator | Burn damage fills the Mmmph meter for the Mercenary (stock Pyro values) and alt-fire at 100 % activates it; a HUD meter shows the charge |
 | Medkit, Cash Wad, Grappling Hook, Hoarder's Stash | MarxVee extras (disabled by default) |
+
+### Eternal Shotgun meat hook (`tf2cc_hook`)
+
+The Eternal Shotgun is Open Fortress's Super Shotgun with a meat hook on alt-fire. The hook
+flies at 3500 u/s and latches only onto enemy players within 900 units; the target is pinned
+and the wielder is pulled towards it until close, out of sight, firing, switching weapons or
+pressing alt-fire again (1 s cooldown). Cvars (off by default) add a Sandman-style stun on
+the hooked player, hold-to-reel, and hooking the world as a grappling hook.
+
+### Saw Ballista blade (`tf2cc_saw`)
+
+The stock rocket launcher's rocket becomes Open Fortress's saw blade. It never explodes:
+it flies through players and buildings dealing 4 damage every 0.03 s (at most 200 per blade
+per target, slowed to 15 % of its speed while inside someone), ricochets off walls with no
+speed loss, can hurt its owner after its first bounce, and after 6 counted bounces sticks in
+the wall for 5 s. Fire 0.4 s, one blade per 1.2 s reload, 10 in reserve.
 
 ## 3. Civilian (`tf2cc_civilian`)
 

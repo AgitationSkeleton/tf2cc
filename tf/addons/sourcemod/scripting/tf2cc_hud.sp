@@ -93,7 +93,9 @@ void BuildMeters(int client, char[] text, int maxlen)
 		}
 		if (StrEqual(cls, "tf_weapon_particle_cannon") || StrEqual(cls, "tf_weapon_raygun") || StrEqual(cls, "tf_weapon_drg_pomson"))
 			AddLine(text, maxlen, "Energy: %.0f%%", GetEntPropFloat(w, Prop_Send, "m_flEnergy") * 5.0);
-		if (StrEqual(cls, "tf_weapon_buff_item") || StrEqual(cls, "tf_weapon_flamethrower") || StrEqual(cls, "tf_weapon_sniperrifle"))
+		// The Phlogistinator's Mmmph meter is drawn by tf2cc_specials (tf2cc_phlog_meter) when it is loaded.
+		if (StrEqual(cls, "tf_weapon_buff_item") || StrEqual(cls, "tf_weapon_sniperrifle")
+			|| (StrEqual(cls, "tf_weapon_flamethrower") && !LibraryExists("tf2cc_specials")))
 			rage = true;
 		if (StrEqual(cls, "tf_weapon_soda_popper") || StrEqual(cls, "tf_weapon_pep_brawler_blaster"))
 			hype = true;

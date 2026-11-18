@@ -3001,6 +3001,18 @@ public Action Listener_Inspect(int client, const char[] command, int argc)
 	return Plugin_Continue;
 }
 
+/** The TF2 client sends its inspect key as a KeyValues message ("+inspect_server", see
+ *  tf_hud_inspectpanel.cpp InspectDown), not as a "+inspect" command, so Listener_Inspect
+ *  never sees it. Swap here; the game still gets the message (inspect anim, target inspect). */
+public Action OnClientCommandKeyValues(int client, KeyValues kv)
+{
+	char name[32];
+	kv.GetSectionName(name, sizeof(name));
+	if (StrEqual(name, "+inspect_server", false) && TF2CC_IsValidClient(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)
+		TrySwapNearby(client);
+	return Plugin_Continue;
+}
+
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
 	if (IsPlayerAlive(client) && TF2CC_GetRole(client) != TF2CC_ROLE_NONE)

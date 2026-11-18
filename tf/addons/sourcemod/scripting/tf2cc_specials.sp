@@ -52,6 +52,7 @@ int g_iBackpack[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 bool g_bHoarder[MAXPLAYERS + 1];
 #define ZAP_SOUND "weapons/barret_arm_zap.wav"
 #define HOOK_HIT_SOUND "weapons/grappling_hook_impact_flesh.wav"
+#define QUAD_PING_SOUND "ui/cyoa_ping_available.wav"   // OF Weapon_Quad.Ping (stock TF2 sample)
 #define BACKPACK_MODEL "models/weapons/customclasses/w_models/merc_bp.mdl"
 float g_flNextMed[MAXPLAYERS + 1];
 float g_flInfectEnd[MAXPLAYERS + 1];
@@ -60,6 +61,8 @@ ConVar g_cvPf2Delay, g_cvPf2Heal, g_cvPf2Damage, g_cvPf2Range, g_cvPf2InfectTime
 
 #define BOMBLET_MODEL "models/weapons/customclasses/w_models/w_grenade_bomblet.mdl"
 #define DYNAMITE_MODEL "models/weapons/customclasses/w_models/w_dynamite.mdl"
+#define BOUNCER_MODEL "models/weapons/customclasses/w_models/w_grenade_bouncer.mdl"
+#define BOUNCER_SOUND "weapons/custom/bouncer_nade_impact.wav"   // OF BouncerGrenade.ImpactHard/Soft
 #define NAIL_MODEL "models/weapons/w_models/w_nail.mdl"
 #define DRG_BALL_MODEL "models/weapons/w_models/w_drg_ball.mdl"
 bool g_bModelDrgBall;
@@ -70,6 +73,14 @@ int g_iBurstShots[MAXPLAYERS + 1];
 float g_flBurstLast[MAXPLAYERS + 1];
 int g_iBurstWeapon[MAXPLAYERS + 1] = { INVALID_ENT_REFERENCE, ... };
 bool g_bModelDynamite;
+bool g_bModelBouncer;
+ArrayList g_BouncerList;   // entrefs of live Bouncer grenades
+float g_vBouncerVel[2049][3];   // velocity estimated from the last two positions
+float g_vBouncerPos[2049][3];   // position last frame
+float g_flBouncerFuse[2049];    // when the fuse runs out
+bool g_bBouncerFirst[2049];     // no position history yet
+float g_flBouncerSnd[2049];
+ConVar g_cvBouncerElastic, g_cvBouncerMin, g_cvBouncerGravity, g_cvBouncerSpeed, g_cvBouncerPitch, g_cvBouncerFuse;
 #define BOMBLET_DYNAMITE 1
 #define BOMBLET_GIB 2
 #define BOMBLET_VARIANTS 3
@@ -91,7 +102,15 @@ float g_vecSawPos[MAXPLAYERS + 1][3];
 int g_iSawLauncher[MAXPLAYERS + 1];
 ArrayList g_ImpactList;   // entrefs of grenades that detonate on their first contact
 ArrayList g_QuadRockets;   // entrefs
-ConVar g_cvQuadHoming, g_cvQuadTurn;
+ConVar g_cvQuadHoming, g_cvQuadTurn, g_cvQuadToggle, g_cvQuadRadiusStep, g_cvQuadRadiusBase, g_cvQuadPing;
+bool g_bQuadOff[MAXPLAYERS + 1];       // OF m_bHoming == false (alt-fire toggled homing off)
+bool g_bQuadAtk2[MAXPLAYERS + 1];      // alt-fire held last tick (edge detection)
+float g_flQuadPing[MAXPLAYERS + 1];    // next homing ping
+int g_iQuadShots[MAXPLAYERS + 1];      // rockets fired since the last reload (OF m_flBlastRadiusIncrease)
+int g_iQuadClip[MAXPLAYERS + 1];       // clip seen last tick
+int g_iQuadWeapon[MAXPLAYERS + 1];     // entref of the Quad those counters belong to
+float g_flQuadScale[2048];             // per rocket: blast radius multiplier from its shot index
+int g_iQuadRef[2048];                  // entref of the rocket already tracked in that slot
 ArrayList g_ChinaList;   // { entref, spawn game time }
 ConVar g_cvChinaImpactTime, g_cvChinaEnemyTouch;
 bool g_bChinaFull[2049];
@@ -191,9 +210,24 @@ public void OnPluginStart()
 	g_cvDynamiteImpact = CreateConVar("tf2cc_dynamite_impact", "1", "Dynamite bundles explode on their first contact (OF ExplodeOnImpact 1).", _, true, 0.0, true, 1.0);
 	g_ImpactList = new ArrayList();
 	g_ChinaList = new ArrayList(2);
+	g_BouncerList = new ArrayList();
 	g_cvQuadHoming = CreateConVar("tf2cc_quad_homing", "1", "Quad Launcher rockets home on the point the owner aims at while the Quad is out (OF m_bHoming / laser dot).", _, true, 0.0, true, 1.0);
-	g_cvQuadTurn = CreateConVar("tf2cc_quad_turn_rate", "6.0", "Quad rocket steering per second (fraction of the way to the aim direction).", _, true, 0.0);
+	g_cvQuadTurn = CreateConVar("tf2cc_quad_turn_rate", "12.0", "Quad rocket steering per second (fraction of the way to the aim direction). 12 = the steering live servers had before the double-tracking fix (6 applied twice per tick); OF snaps fully every 0.1 s.", _, true, 0.0);
+	// OF CTFSuperRocketLauncher::SecondaryAttack -> SwitchHomingModes (also while reloading, ItemBusyFrame).
+	g_cvQuadToggle = CreateConVar("tf2cc_quad_toggle", "1", "Quad Launcher alt-fire toggles homing on/off for the owner's rockets (OF SwitchHomingModes).", _, true, 0.0, true, 1.0);
+	// OF ContinuousFire_BlastRadiusIncrease 25 on DamageRadius 100: each shot adds 25 to the radius until the next reload.
+	g_cvQuadRadiusStep = CreateConVar("tf2cc_quad_radius_step", "25", "Quad Launcher: blast radius added per rocket fired since the last reload (OF ContinuousFire_BlastRadiusIncrease; 0 disables).", _, true, 0.0);
+	g_cvQuadRadiusBase = CreateConVar("tf2cc_quad_radius_base", "100", "Quad Launcher: the OF base radius the step is relative to (OF DamageRadius 100).", _, true, 1.0);
+	g_cvQuadPing = CreateConVar("tf2cc_quad_ping", "1", "Quad Launcher: ping sound every second while homing is on and the Quad is out (OF Weapon_Quad.Ping).", _, true, 0.0, true, 1.0);
 	g_cvChinaImpactTime = CreateConVar("tf2cc_chinalake_impact_time", "0.1", "China Lake: grenades explode on any impact within this many seconds of firing (OF ImpactBeforeTime 0.1).", _, true, 0.0);
+	// OF Bouncer (tf_weapon_bouncer, CTFProjectile_BouncyRocket): a rocket on a gravity arc that
+	// ricochets off the world. Here a stock pipe (native 2 s fuse, Detonate input, no gamedata).
+	g_cvBouncerElastic = CreateConVar("tf2cc_bouncer_elasticity", "0.9", "Bouncer: speed kept per bounce (OF SetElasticity 0.9).", _, true, 0.0, true, 1.0);
+	g_cvBouncerMin = CreateConVar("tf2cc_bouncer_min_speed", "200", "Bouncer: impacts slower than this are left to the physics (OF: no bounce below 200 u/s).", _, true, 0.0);
+	g_cvBouncerGravity = CreateConVar("tf2cc_bouncer_gravity", "1.5", "Bouncer: gravity scale (OF SetGravity 1.5; the pipe's physics gives 1.0, the rest is added per frame).", _, true, 0.0);
+	g_cvBouncerSpeed = CreateConVar("tf2cc_bouncer_speed", "750", "Bouncer: launch speed (OF ProjectileSpeed 750).", _, true, 0.0);
+	g_cvBouncerPitch = CreateConVar("tf2cc_bouncer_pitch", "15", "Bouncer: launch pitched up this many degrees from the aim (OF 15).", _, true, -90.0, true, 90.0);
+	g_cvBouncerFuse = CreateConVar("tf2cc_bouncer_fuse", "2.0", "Bouncer: fuse from firing (OF FuseTime 2).", _, true, 0.1);
 	g_cvChinaEnemyTouch = CreateConVar("tf2cc_chinalake_enemy_touch", "1", "China Lake: grenades still explode on touching an enemy after they bounced (OF AlwaysEnableTouch 1).", _, true, 0.0, true, 1.0);
 	// OF Saw Ballista (of_weapon_ripper.cpp): the blade slows to 5% while inside a target
 	// and deals its damage every 0.03 s think; approximated as damage over contact time.
@@ -214,6 +248,7 @@ public void OnPluginStart()
 	g_cvCsMeterX = CreateConVar("tf2cc_chainsaw_charge_meter_x", "0.73", "Chainsaw charge meter X (0-1, -1 = centre); same spot as the umbrella boost meter.");
 	g_cvCsMeterY = CreateConVar("tf2cc_chainsaw_charge_meter_y", "0.86", "Chainsaw charge meter Y (0-1).");
 	CreateTimer(0.1, Timer_ChainsawMeter, _, TIMER_REPEAT);
+	PhlogInit();
 	AddTempEntHook("TFExplosion", TE_TFExplosion);
 	AutoExecConfig(true, "tf2cc_specials");
 	CreateTimer(0.5, Timer_Infection, _, TIMER_REPEAT);
@@ -241,6 +276,7 @@ public void OnMapStart()
 		g_flCsChargeEnd[i] = 0.0;
 		g_flCsChargeReady[i] = 0.0;
 		g_flCsChargeStart[i] = 0.0;
+		g_flQuadPing[i] = 0.0;
 	}
 	for (int i = 0; i < sizeof(CS_DEMO_SCREAM); i++)
 		PrecacheSound(CS_DEMO_SCREAM[i], true);
@@ -248,10 +284,13 @@ public void OnMapStart()
 	PrecacheSound(HEAL_SOUND, true);
 	PrecacheSound(ZAP_SOUND, true);
 	PrecacheSound(HOOK_HIT_SOUND, true);
+	PrecacheSound(QUAD_PING_SOUND, true);
 	g_iBeamLaser = PrecacheModel("materials/sprites/laserbeam.vmt", true);
 	g_iBeamGlow = PrecacheModel("materials/sprites/glow01.vmt", true);
 	g_bModelBomblet = PrecacheModel(BOMBLET_MODEL, true) != 0;
 	g_bModelDynamite = PrecacheModel(DYNAMITE_MODEL, true) != 0;
+	g_bModelBouncer = PrecacheModel(BOUNCER_MODEL, true) != 0;
+	PrecacheSound(BOUNCER_SOUND, true);
 	g_iNailModelIndex = PrecacheModel(NAIL_MODEL, true);
 	g_bModelNail = g_iNailModelIndex != 0;
 	g_bModelDrgBall = PrecacheModel(DRG_BALL_MODEL, true) != 0;
@@ -363,6 +402,7 @@ public Action TE_EffectDispatch(const char[] te_name, const int[] players, int n
 public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3], float angles[3], int &weapon)
 {
 	bool burstHeld = IsPlayerAlive(client) && BurstHold(client, buttons);
+	QuadRunCmd(client, buttons);
 	Action r = RunCmdSpecials(client, buttons, impulse, weapon);
 	return burstHeld && r == Plugin_Continue ? Plugin_Changed : r;
 }
@@ -371,6 +411,8 @@ Action RunCmdSpecials(int client, int &buttons, int &impulse, int &weapon)
 {
 	if (IsPlayerAlive(client))
 		GatlingThink(client);
+	if (IsPlayerAlive(client) && PhlogThink(client, buttons))
+		return Plugin_Changed;
 	if (IsPlayerAlive(client) && ChainsawThink(client, buttons))
 		return Plugin_Changed;
 	if (IsPlayerAlive(client) && LunchboxThink(client, buttons))
@@ -797,6 +839,10 @@ public void Event_Spawn(Event event, const char[] name, bool dontBroadcast)
 		RemoveBackpack(client);
 		g_bHoarder[client] = false;
 		ChainsawReset(client);
+		g_bQuadOff[client] = false;   // a new life starts homing (OF constructor m_bHoming = true)
+		g_iQuadShots[client] = 0;
+		g_iQuadWeapon[client] = 0;
+		PhlogReset(client);   // the game resets the rage system on death (ResetRageSystem)
 	}
 }
 
@@ -1227,9 +1273,84 @@ void SetPipeEnemy(int pipe, int enemy)
 
 void QuadTrack(int rocket)
 {
+	// SpawnPost runs twice for a TF2 rocket (measured on the test server: every rocket was
+	// tracked twice, steering twice per tick and counting two shots): track each rocket once.
+	int ref = EntIndexToEntRef(rocket);
+	if (g_iQuadRef[rocket] == ref)
+		return;
+	g_iQuadRef[rocket] = ref;
 	if (g_QuadRockets == null)
 		g_QuadRockets = new ArrayList();
 	g_QuadRockets.Push(EntIndexToEntRef(rocket));
+	// OF: m_flBlastRadiusIncrease += 25 after every shot (CTFWeaponBaseGun::PrimaryAttack), reset by
+	// Reload; GetDamageRadius = DamageRadius * mult + increase. Rocket k (0-based) since the last
+	// reload therefore explodes with 100 + 25k.
+	g_flQuadScale[rocket] = 1.0;
+	int owner = GetEntPropEnt(rocket, Prop_Send, "m_hOwnerEntity");
+	if (owner >= 1 && owner <= MaxClients && g_cvQuadRadiusStep.FloatValue > 0.0)
+	{
+		int k = g_iQuadShots[owner]++;
+		g_flQuadScale[rocket] = (g_cvQuadRadiusBase.FloatValue + g_cvQuadRadiusStep.FloatValue * k) / g_cvQuadRadiusBase.FloatValue;
+	}
+	SDKHook(rocket, SDKHook_Touch, Hook_QuadTouch);
+}
+
+/**
+ * The rocket reads its radius from its launcher's mult_explosion_radius when it explodes (inside
+ * its touch). Right before the native touch runs, the launcher's "Blast radius increased" is set to
+ * this rocket's shot multiplier (weapons.cfg's "Blast radius decreased" stays and multiplies).
+ * Attribute values only: no collision, movement or entity changes inside the callback.
+ */
+public Action Hook_QuadTouch(int rocket, int other)
+{
+	if (!LibraryExists("tf2attributes") || !HasEntProp(rocket, Prop_Send, "m_hOriginalLauncher"))
+		return Plugin_Continue;
+	int launcher = GetEntPropEnt(rocket, Prop_Send, "m_hOriginalLauncher");
+	if (launcher <= MaxClients || !IsValidEntity(launcher))
+		return Plugin_Continue;
+	float scale = g_flQuadScale[rocket] > 0.0 ? g_flQuadScale[rocket] : 1.0;
+	TF2Attrib_SetByName(launcher, "Blast radius increased", scale);
+	TF2Attrib_ClearCache(launcher);
+	return Plugin_Continue;
+}
+
+/** Alt-fire homing toggle, homing ping, and the per-reload shot counter. */
+void QuadRunCmd(int client, int buttons)
+{
+	bool atk2 = (buttons & IN_ATTACK2) != 0;
+	bool edge = atk2 && !g_bQuadAtk2[client];
+	g_bQuadAtk2[client] = atk2;
+	if (!IsPlayerAlive(client))
+		return;
+	char special[32];
+	if (!ActiveSpecial(client, special, sizeof(special)) || !StrEqual(special, "burst4"))
+		return;
+	int w = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+	int clip = GetEntProp(w, Prop_Send, "m_iClip1");
+	if (EntRefToEntIndex(g_iQuadWeapon[client]) != w)
+	{
+		g_iQuadWeapon[client] = EntIndexToEntRef(w);
+		g_iQuadShots[client] = 0;
+		g_iQuadClip[client] = clip;
+	}
+	// OF resets the increase when a reload starts (Reload / ReloadSingly).
+	bool reloading = HasEntProp(w, Prop_Send, "m_iReloadMode") && GetEntProp(w, Prop_Send, "m_iReloadMode") != 0;
+	if (reloading || clip > g_iQuadClip[client])
+		g_iQuadShots[client] = 0;
+	g_iQuadClip[client] = clip;
+
+	if (edge && g_cvQuadToggle.BoolValue)
+	{
+		g_bQuadOff[client] = !g_bQuadOff[client];
+		PrintCenterText(client, g_bQuadOff[client] ? "Homing OFF" : "Homing ON");
+	}
+	float now = GetGameTime();
+	if (!g_bQuadOff[client] && g_cvQuadHoming.BoolValue && g_cvQuadPing.BoolValue && now >= g_flQuadPing[client])
+	{
+		// OF ItemPostFrame/ItemBusyFrame: WeaponSound(SPECIAL3) once a second while m_bHoming (CHAN_STATIC, 95 dB).
+		g_flQuadPing[client] = now + 1.0;
+		EmitSoundToAll(QUAD_PING_SOUND, client, SNDCHAN_STATIC, 95);
+	}
 }
 
 void QuadThink()
@@ -1251,6 +1372,8 @@ void QuadThink()
 		char special[32];
 		if (!ActiveSpecial(owner, special, sizeof(special)) || !StrEqual(special, "burst4"))
 			continue;   // OF: the dot (and homing) exists only while the Quad is out
+		if (g_bQuadOff[owner])
+			continue;   // OF SwitchHomingModes off: every live rocket flies straight
 		float eye[3], ang[3], dir[3], end[3];
 		GetClientEyePosition(owner, eye);
 		GetClientEyeAngles(owner, ang);
@@ -1291,6 +1414,195 @@ void ChinaTrack(int entity)
 	g_ChinaList.PushArray(row);
 	g_bChinaFull[entity] = false;
 	SDKHook(entity, SDKHook_Touch, Hook_ChinaTouch);
+}
+
+/* ========================================================================= */
+/* Bouncer (OF tf_weapon_bouncer, special "bouncer"). OF fires a rocket on a  */
+/* gravity arc (1.5) pitched 15 deg up at 750 u/s that ricochets off the     */
+/* world keeping 90 % of its speed, explodes on touching anything else and   */
+/* after 2 s, with full damage and no falloff. Here the stock grenade        */
+/* launcher's pipe: launched as OF, its fuse set to 2 s, any enemy contact   */
+/* detonates it (also after a bounce), the timer explosion gets the full     */
+/* damage (stock pipes keep 60 % unless they hit directly), and each         */
+/* impact's speed loss is topped up to OF's 0.9 from the game frame (outside */
+/* the VPhysics callback). The extra 0.5 g is added per frame. VPhysics      */
+/* pipes do not update m_vecAbsVelocity: the velocity is estimated from the  */
+/* positions of the last two frames.                                         */
+/* ========================================================================= */
+
+void BouncerTrack(int pipe)
+{
+	if (g_bModelBouncer)
+		SetEntityModel(pipe, BOUNCER_MODEL);
+	g_bChinaFull[pipe] = false;             // ChinaDetonate / the fuse restore the full damage once
+	g_flBouncerSnd[pipe] = 0.0;
+	SDKHook(pipe, SDKHook_Touch, Hook_BouncerTouch);
+	int owner = GetEntPropEnt(pipe, Prop_Send, "m_hThrower");
+	if (owner < 1 || owner > MaxClients)
+		owner = GetEntPropEnt(pipe, Prop_Send, "m_hOwnerEntity");
+	float vel[3];
+	if (owner >= 1 && owner <= MaxClients && IsClientInGame(owner))
+	{
+		// OF CTFProjectile_BouncyRocket::Create: aim pitched 15 deg up (not past straight up), x 750.
+		float ang[3];
+		GetClientEyeAngles(owner, ang);
+		ang[0] -= g_cvBouncerPitch.FloatValue;
+		if (ang[0] < -90.0)
+			ang[0] = -90.0;
+		GetAngleVectors(ang, vel, NULL_VECTOR, NULL_VECTOR);
+		ScaleVector(vel, g_cvBouncerSpeed.FloatValue);
+		TeleportEntity(pipe, NULL_VECTOR, NULL_VECTOR, vel);
+	}
+	else
+		GetEntPropVector(pipe, Prop_Data, "m_vecAbsVelocity", vel);
+	g_vBouncerVel[pipe] = vel;
+	g_bBouncerFirst[pipe] = true;
+	// The pipe was created one frame ago: the fuse runs 2 s from the shot.
+	g_flBouncerFuse[pipe] = GetGameTime() + g_cvBouncerFuse.FloatValue - GetTickInterval();
+	SetPipeDetonateTime(pipe, g_flBouncerFuse[pipe]);
+	g_BouncerList.Push(EntIndexToEntRef(pipe));
+}
+
+public Action Hook_BouncerTouch(int pipe, int other)
+{
+	// Before the first bounce the stock touch explodes on enemies itself (restoring the full damage
+	// from its 60 %: undo an early fuse restore so it is not applied twice); after it, OF still does.
+	if (other < 1)
+		return Plugin_Continue;
+	if (!GetEntProp(pipe, Prop_Send, "m_bTouched"))
+	{
+		if (g_bChinaFull[pipe] && other <= MaxClients && HasEntProp(pipe, Prop_Send, "m_flDamage"))
+		{
+			g_bChinaFull[pipe] = false;
+			SetEntPropFloat(pipe, Prop_Send, "m_flDamage", GetEntPropFloat(pipe, Prop_Send, "m_flDamage") * 0.6);
+		}
+		return Plugin_Continue;
+	}
+	int team = GetEntProp(pipe, Prop_Send, "m_iTeamNum");
+	if (other <= MaxClients)
+	{
+		if (!IsClientInGame(other) || !IsPlayerAlive(other) || GetClientTeam(other) == team)
+			return Plugin_Continue;
+	}
+	else
+	{
+		char cls[32];
+		GetEntityClassname(other, cls, sizeof(cls));
+		if (StrContains(cls, "obj_") != 0 || GetEntProp(other, Prop_Send, "m_iTeamNum") == team)
+			return Plugin_Continue;
+	}
+	ChinaDetonate(pipe, other);
+	return Plugin_Continue;
+}
+
+void BouncerThink()
+{
+	float dt = GetTickInterval(), now = GetGameTime();
+	float g = FindConVar("sv_gravity").FloatValue;
+	float extra = (g_cvBouncerGravity.FloatValue - 1.0) * g * dt;
+	for (int i = g_BouncerList.Length - 1; i >= 0; i--)
+	{
+		int pipe = EntRefToEntIndex(g_BouncerList.Get(i));
+		if (pipe <= MaxClients)
+		{
+			g_BouncerList.Erase(i);
+			continue;
+		}
+		// OF's bouncy rocket explodes on its 2 s fuse with its full damage; stock pipes keep 60 %
+		// for the timer. Restore it just before the fuse (the pipe's own fuse think does the rest).
+		if (!g_bChinaFull[pipe] && now + 2.0 * dt >= g_flBouncerFuse[pipe] && HasEntProp(pipe, Prop_Send, "m_flDamage"))
+		{
+			g_bChinaFull[pipe] = true;
+			SetEntPropFloat(pipe, Prop_Send, "m_flDamage", GetEntPropFloat(pipe, Prop_Send, "m_flDamage") / 0.6);
+		}
+		float pos[3], v[3], a[3], b[3];
+		GetEntPropVector(pipe, Prop_Data, "m_vecAbsOrigin", pos);
+		if (g_bBouncerFirst[pipe])
+		{
+			g_bBouncerFirst[pipe] = false;
+			g_vBouncerPos[pipe] = pos;
+			continue;
+		}
+		float old[3];
+		old = g_vBouncerPos[pipe];
+		for (int k = 0; k < 3; k++)
+			v[k] = (pos[k] - old[k]) / dt;
+		g_vBouncerPos[pipe] = pos;
+		float sin = GetVectorLength(g_vBouncerVel[pipe]), sout = GetVectorLength(v);
+		bool changed = false;
+		if (sin > g_cvBouncerMin.FloatValue)
+		{
+			NormalizeVector(g_vBouncerVel[pipe], a);
+			if (sout > 1.0)
+				NormalizeVector(v, b);
+			// An impact: the pipe turned sharply or lost speed at once (VPhysics pipes mostly stop
+			// and roll). OF reflects the incoming velocity off the surface, x 0.9.
+			if (sout < sin * 0.8 || (sout > 1.0 && GetVectorDotProduct(a, b) < 0.5))
+			{
+				float n[3];
+				if (SurfaceNormal(pipe, old, a, sin * dt * 2.0 + 24.0, n))
+				{
+					float d = GetVectorDotProduct(g_vBouncerVel[pipe], n) * 2.0;
+					if (d < 0.0)
+					{
+						for (int k = 0; k < 3; k++)
+							v[k] = (g_vBouncerVel[pipe][k] - n[k] * d) * g_cvBouncerElastic.FloatValue;
+						changed = true;
+					}
+				}
+				else if (sout > 1.0 && sout < sin * g_cvBouncerElastic.FloatValue)
+				{
+					ScaleVector(b, sin * g_cvBouncerElastic.FloatValue);
+					v = b;
+					changed = true;
+				}
+				if (now > g_flBouncerSnd[pipe] + 0.1)
+				{
+					g_flBouncerSnd[pipe] = now;
+					EmitSoundToAll(BOUNCER_SOUND, pipe, SNDCHAN_AUTO, SNDLEVEL_NORMAL);
+				}
+			}
+		}
+		// The physics velocity now is about half a tick of gravity below the frame average.
+		if (extra > 0.0 && sout > 50.0 && !OnGroundish(pipe, pos))
+		{
+			if (!changed)
+				v[2] -= 0.5 * g * dt;
+			v[2] -= extra;
+			changed = true;
+		}
+		if (changed)
+			TeleportEntity(pipe, NULL_VECTOR, NULL_VECTOR, v);
+		g_vBouncerVel[pipe] = v;
+	}
+}
+
+/** Plane normal of the surface ahead of `from` along `dir` (unit), within `dist`. */
+bool SurfaceNormal(int pipe, const float from[3], const float dir[3], float dist, float n[3])
+{
+	float end[3];
+	for (int k = 0; k < 3; k++)
+		end[k] = from[k] + dir[k] * dist;
+	Handle tr = TR_TraceHullFilterEx(from, end, view_as<float>({-2.0, -2.0, -2.0}), view_as<float>({2.0, 2.0, 2.0}), MASK_SOLID, Filter_NotSelf, pipe);
+	bool ok = TR_DidHit(tr) && !TR_StartSolid(tr);
+	if (ok)
+	{
+		TR_GetPlaneNormal(tr, n);
+		ok = GetVectorLength(n) > 0.5;
+	}
+	delete tr;
+	return ok;
+}
+
+bool OnGroundish(int pipe, const float pos[3])
+{
+	float end[3];
+	end = pos;
+	end[2] -= 8.0;
+	Handle tr = TR_TraceRayFilterEx(pos, end, MASK_SOLID_BRUSHONLY, RayType_EndPoint, Filter_NotSelf, pipe);
+	bool hit = TR_DidHit(tr);
+	delete tr;
+	return hit;
 }
 
 void ChinaDetonate(int pipe, int enemy)
@@ -1370,6 +1682,14 @@ public void Frame_CheckBombParent(int ref)
 		GetEntityClassname(entity, rcls, sizeof(rcls));
 		if (StrEqual(rcls, "tf_projectile_rocket"))
 			QuadTrack(entity);
+		return;
+	}
+	if (StrEqual(special, "bouncer"))
+	{
+		char bcls[64];
+		GetEntityClassname(entity, bcls, sizeof(bcls));
+		if (StrEqual(bcls, "tf_projectile_pipe"))
+			BouncerTrack(entity);
 		return;
 	}
 	if (StrEqual(special, "chinalake"))
@@ -1561,6 +1881,7 @@ public Action Hook_BombletTouch(int bomb, int other)
 public void OnGameFrame()
 {
 	ChinaThink();
+	BouncerThink();
 	QuadThink();
 	for (int i = g_ImpactList.Length - 1; i >= 0; i--)
 	{
@@ -2081,6 +2402,7 @@ public void OnPluginEnd()
 
 public void TF2CC_OnRoleCleared(int client, int oldRole)
 {
+	PhlogReset(client);
 	ChainsawReset(client);
 	ChargeSpeedEnd(client);
 }
@@ -2199,4 +2521,214 @@ void GatlingStop(int client, int weapon, bool winddown)
 	g_sGatFire[client][0] = '\0';
 	if (winddown)
 		EmitSoundToAll(GAT_SND_WINDDOWN, weapon, SNDCHAN_AUTO, GAT_LEVEL);
+}
+
+/* ========================================================================= */
+/* Phlogistinator (stock item 594) on a role player                          */
+/*  The rage system itself is class-independent (CTFPlayerShared::          */
+/*  UpdateRageBuffsAndRage drains m_flRageMeter for any class while          */
+/*  m_bRageDraining). Two places are Pyro-only:                              */
+/*   - fill: HandleRageGain (tf_player.cpp) reads the flamethrower's buff    */
+/*     type only when IsPlayerClass(TF_CLASS_PYRO): class 10 never earns;    */
+/*   - activation: CTFFlameThrower::SecondaryAttack -> UseRage ->            */
+/*     CTFPlayer::Taunt(TAUNT_BASE_WEAPON) activates only for a Pyro playing */
+/*     scenes/player/pyro/low/taunt01 (ActivateRageBuff + invulnerability).  */
+/*  The meter HUD is a Pyro-only item meter (CHudItemEffectMeter).           */
+/*  Emulated here with the stock values:                                     */
+/*   gain: damage * rage_giving_scale(victim) / 3 (MvM 12) for DMG_BURN or   */
+/*         DMG_IGNITE (= DMG_PLASMA) damage to another player (buff type 5,  */
+/*         scale 1); none while draining or for flametime + 0.1 s after one;*/
+/*   alt-fire at 100: tf2cc taunt + Merc laugh, TF_COND_INVULNERABLE_USER_   */
+/*         BUFF and TF_COND_MEGAHEAL 2.6 s, TF_COND_CRITBOOSTED_RAGE_BUFF    */
+/*         for the 10 pulses (each pulse adds the cond for 1.2 s), and       */
+/*         m_bRageDraining = 1 so the game drains the meter itself (10 %/s). */
+/*  No full heal: removed from the stock Phlog in the 2016-01-20 patch.      */
+/* ========================================================================= */
+
+#define PHLOG_BUFF_TYPE 5
+#define PHLOG_INVULN_TIME 2.6     // CTFPlayer::Taunt: AddCond(TF_COND_INVULNERABLE_USER_BUFF, 2.60f)
+#define PHLOG_PULSES 10           // g_RageBuffTypes[5].m_nMaxPulses
+#define PHLOG_PULSE_COND 1.2      // PulseRageBuff: AddCond(eBuffCond, 1.2f)
+
+ConVar g_cvPhlog, g_cvPhlogMeter, g_cvPhlogMeterX, g_cvPhlogMeterY, g_cvPhlogDebug;
+Handle g_hPhlogMeter;
+float g_flPhlogNextEarn[MAXPLAYERS + 1];
+bool g_bPhlogDraining[MAXPLAYERS + 1];   // a drain this module started (stamps the earn cooldown when it ends)
+float g_flPhlogLog[MAXPLAYERS + 1];
+
+void PhlogInit()
+{
+	g_cvPhlog = CreateConVar("tf2cc_phlog", "1", "Phlogistinator Mmmph for role players: burn damage fills the rage meter and alt-fire at 100% activates it (stock Pyro values).", _, true, 0.0, true, 1.0);
+	g_cvPhlogMeter = CreateConVar("tf2cc_phlog_meter", "1", "Show the Mmmph meter to role players who carry the Phlogistinator.", _, true, 0.0, true, 1.0);
+	g_cvPhlogMeterX = CreateConVar("tf2cc_phlog_meter_x", "0.73", "Mmmph meter X (0-1, -1 = centre); same spot as the chainsaw / umbrella meters.");
+	g_cvPhlogMeterY = CreateConVar("tf2cc_phlog_meter_y", "0.86", "Mmmph meter Y (0-1).");
+	g_cvPhlogDebug = CreateConVar("tf2cc_phlog_debug", "0", "1 = print Mmmph gain and activation to the server console.", _, true, 0.0, true, 1.0);
+	g_hPhlogMeter = CreateHudSynchronizer();
+	CreateTimer(0.1, Timer_PhlogMeter, _, TIMER_REPEAT);
+	for (int i = 1; i <= MaxClients; i++)
+		if (IsClientInGame(i))
+			SDKHook(i, SDKHook_OnTakeDamageAlivePost, Hook_PhlogDamage);
+}
+
+public void OnClientPutInServer(int client)
+{
+	SDKHook(client, SDKHook_OnTakeDamageAlivePost, Hook_PhlogDamage);
+	PhlogReset(client);
+}
+
+void PhlogReset(int client)
+{
+	g_flPhlogNextEarn[client] = 0.0;
+	g_bPhlogDraining[client] = false;
+}
+
+/** The set_buff_type 5 flamethrower a role player (not a real Pyro) owns / has out, or -1. */
+int PhlogWeapon(int client, bool activeOnly = false)
+{
+	if (!g_cvPhlog.BoolValue || client < 1 || client > MaxClients || !IsClientInGame(client)
+		|| TF2CC_GetRole(client) == TF2CC_ROLE_NONE || TF2_GetPlayerClass(client) == TFClass_Pyro)
+		return -1;
+	if (activeOnly)
+	{
+		int w = GetEntPropEnt(client, Prop_Send, "m_hActiveWeapon");
+		return IsPhlog(w) ? w : -1;
+	}
+	int n = GetEntPropArraySize(client, Prop_Send, "m_hMyWeapons");
+	for (int i = 0; i < n; i++)
+	{
+		int w = GetEntPropEnt(client, Prop_Send, "m_hMyWeapons", i);
+		if (IsPhlog(w))
+			return w;
+	}
+	return -1;
+}
+
+bool IsPhlog(int w)
+{
+	if (w <= MaxClients || !IsValidEntity(w))
+		return false;
+	char cls[40];
+	if (!GetEntityClassname(w, cls, sizeof(cls)) || !StrEqual(cls, "tf_weapon_flamethrower"))
+		return false;
+	// CTFFlameThrower::GetBuffType = set_buff_type (the Phlogistinator's is 5).
+	if (LibraryExists("tf2attributes"))
+		return RoundToFloor(TF2Attrib_HookValueFloat(0.0, "set_buff_type", w)) == PHLOG_BUFF_TYPE;
+	return GetEntProp(w, Prop_Send, "m_iItemDefinitionIndex") == 594;
+}
+
+/** HandleRageGain(attacker, kRageBuffFlag_OnBurnDamageDealt, dmg * rage_giving_scale, MvM ? 12 : 3). */
+public void Hook_PhlogDamage(int victim, int attacker, int inflictor, float damage, int damagetype, int weapon,
+	const float damageForce[3], const float damagePosition[3], int damagecustom)
+{
+	if (attacker == victim || damage <= 0.0 || !(damagetype & (DMG_BURN | DMG_PLASMA)))
+		return;
+	if (PhlogWeapon(attacker) < 0 || !IsPlayerAlive(attacker))
+		return;
+	if (GetEntProp(attacker, Prop_Send, "m_bRageDraining"))
+		return;   // CTFPlayerShared::SetRageMeter: no gain while draining
+	float now = GetGameTime();
+	if (now < g_flPhlogNextEarn[attacker])
+		return;   // ...nor before m_flNextRageEarnTime
+	float scale = LibraryExists("tf2attributes") ? TF2Attrib_HookValueFloat(1.0, "rage_giving_scale", victim) : 1.0;
+	bool mvm = GameRules_GetProp("m_bPlayingMannVsMachine") != 0;
+	float before = GetEntPropFloat(attacker, Prop_Send, "m_flRageMeter");
+	float after = before + damage * scale / (mvm ? 12.0 : 3.0);
+	if (after > 100.0)
+		after = 100.0;
+	SetEntPropFloat(attacker, Prop_Send, "m_flRageMeter", after);
+	if (g_cvPhlogDebug.BoolValue && before < 100.0 && (now - g_flPhlogLog[attacker] >= 0.25 || after >= 100.0))
+	{
+		g_flPhlogLog[attacker] = now;
+		PrintToServer("[tf2cc phlog] %N rage %.1f -> %.1f (dmg %.1f type 0x%x)", attacker, before, after, damage, damagetype);
+	}
+}
+
+/**
+ * Alt-fire with the Phlogistinator out. The stock alt-fire (UseRage -> CTFPlayer::Taunt)
+ * would only start a class-10 taunt concept without the Phlog effect, and the Phlog has
+ * airblast disabled, so the button is always taken for role players.
+ */
+bool PhlogThink(int client, int &buttons)
+{
+	float now = GetGameTime();
+	if (g_bPhlogDraining[client] && !GetEntProp(client, Prop_Send, "m_bRageDraining"))
+	{
+		// UpdateRageBuffsAndRage: pyro rage sets m_flNextRageEarnTime = now + tf_flamethrower_flametime + 0.1.
+		g_bPhlogDraining[client] = false;
+		static ConVar flametime;
+		if (flametime == null)
+			flametime = FindConVar("tf_flamethrower_flametime");
+		g_flPhlogNextEarn[client] = now + (flametime != null ? flametime.FloatValue : 0.5) + 0.1;
+		if (g_cvPhlogDebug.BoolValue)
+			PrintToServer("[tf2cc phlog] %N drain finished, meter %.1f", client, GetEntPropFloat(client, Prop_Send, "m_flRageMeter"));
+	}
+	if (!(buttons & IN_ATTACK2))
+		return false;
+	int w = PhlogWeapon(client, true);
+	if (w < 0)
+		return false;
+	buttons &= ~IN_ATTACK2;
+	if (GetEntPropFloat(client, Prop_Send, "m_flRageMeter") < 100.0 || GetEntProp(client, Prop_Send, "m_bRageDraining")
+		|| GetEntPropFloat(w, Prop_Send, "m_flNextSecondaryAttack") > now
+		|| !LibraryExists("tf2cc_taunts") || TF2CC_IsTaunting(client))
+		return true;
+	PhlogActivate(client, w, now);
+	return true;
+}
+
+void PhlogActivate(int client, int w, float now)
+{
+	// roles.cfg "phlog_taunt" "sequence:seconds:voice concept"
+	char spec[96], p[3][48];
+	if (!TF2CC_GetRoleString(TF2CC_GetRole(client), "phlog_taunt", spec, sizeof(spec)) || !spec[0])
+		strcopy(spec, sizeof(spec), "taunt02:2.93:_laughevil");
+	ExplodeString(spec, ":", p, sizeof(p), sizeof(p[]));
+	float dur = p[1][0] ? StringToFloat(p[1]) : 2.93;
+	if (!TF2CC_PlayTaunt(client, p[0], dur))
+		return;   // not allowed to taunt right now: like a failed stock Taunt, nothing happens
+	bool spoke = p[2][0] && LibraryExists("tf2cc_voice") && TF2CC_Speak(client, p[2], true);   // the Merc's laugh in place of the Pyro's taunt01 laugh
+	// CTFPlayerShared::ActivateRageBuff(this, 5): drain + per-second crit pulses (mod_buff_duration scales the count).
+	int pulses = LibraryExists("tf2attributes") ? RoundToFloor(TF2Attrib_HookValueFloat(float(PHLOG_PULSES), "mod_buff_duration", client)) : PHLOG_PULSES;
+	SetEntProp(client, Prop_Send, "m_bRageDraining", 1);
+	g_bPhlogDraining[client] = true;
+	TF2_AddCondition(client, TFCond_CritMmmph, float(pulses) + PHLOG_PULSE_COND, client);
+	TF2_AddCondition(client, TFCond_UberchargedCanteen, PHLOG_INVULN_TIME, client);
+	TF2_AddCondition(client, TFCond_MegaHeal, PHLOG_INVULN_TIME, client);
+	SetEntPropFloat(w, Prop_Send, "m_flNextSecondaryAttack", now + 1.0);   // UseRage: taunt succeeded
+	if (g_cvPhlogDebug.BoolValue)
+		PrintToServer("[tf2cc phlog] %N activated: taunt %s %.2fs, voice %s (%s), crits %.2fs", client, p[0], dur, p[2], spoke ? "played" : "none", float(pulses) + PHLOG_PULSE_COND);
+}
+
+/** The Pyro's Mmmph meter is a Pyro-only HUD element: HUD text like the chainsaw meter. */
+public Action Timer_PhlogMeter(Handle timer)
+{
+	if (!g_cvPhlogMeter.BoolValue)
+		return Plugin_Continue;
+	char special[32], bar[16];
+	for (int client = 1; client <= MaxClients; client++)
+	{
+		if (!IsClientInGame(client) || IsFakeClient(client) || !IsPlayerAlive(client) || PhlogWeapon(client) < 0)
+			continue;
+		if (g_cvCsMeter.BoolValue && ActiveSpecial(client, special, sizeof(special)) && StrEqual(special, "chainsaw"))
+			continue;   // the chainsaw meter has this spot while the saw is out
+		float rage = GetEntPropFloat(client, Prop_Send, "m_flRageMeter");
+		bool draining = GetEntProp(client, Prop_Send, "m_bRageDraining") != 0;
+		int filled = draining ? RoundToCeil(rage / 10.0) : RoundToFloor(rage / 10.0);
+		if (filled > 10) filled = 10;
+		if (filled < 0) filled = 0;
+		for (int i = 0; i < 10; i++)
+			bar[i] = i < filled ? '|' : '.';
+		bar[10] = '\0';
+		bool blue = GetClientTeam(client) == view_as<int>(TFTeam_Blue);
+		int r = blue ? 120 : 255, g = blue ? 170 : 110, b = blue ? 255 : 100;
+		bool ready = !draining && rage >= 100.0;
+		SetHudTextParams(g_cvPhlogMeterX.FloatValue, g_cvPhlogMeterY.FloatValue, 0.2, r, g, b, ready || draining ? 255 : 200, 0, 0.0, 0.0, 0.0);
+		if (draining)
+			ShowSyncHudText(client, g_hPhlogMeter, "Mmmph [%s] CRITS", bar);
+		else if (ready)
+			ShowSyncHudText(client, g_hPhlogMeter, "Mmmph [%s] READY (alt-fire)", bar);
+		else
+			ShowSyncHudText(client, g_hPhlogMeter, "Mmmph [%s] %.0f%%", bar, rage);
+	}
+	return Plugin_Continue;
 }

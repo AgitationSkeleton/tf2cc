@@ -67,6 +67,35 @@ Config file: `cfg/sourcemod/tf2cc_core.cfg`
 | `sm_tf2cc_status` | admin: generic | Show role state of every player. |
 | `sm_tf2cc_setrole` | admin: slay | sm_tf2cc_setrole <target> <role\|none> - bots stay pinned to it until they leave. |
 
+## tf2cc Eternal Shotgun meat hook (`tf2cc_hook.smx`)
+
+Config file: `cfg/sourcemod/tf2cc_hook.cfg`
+
+| Cvar | Default | Range | What it does |
+|---|---|---|---|
+| `tf2cc_eternal_hook_enable` | `1` | 0 .. 1 | Eternal Shotgun: alt-fire meat hook (OF). |
+| `tf2cc_eternal_hook_speed` | `3500` | >= 1 | Hook flight speed (OF BOLT_AIR_VELOCITY 3500). |
+| `tf2cc_eternal_hook_speed_water` | `1500` | >= 1 | Hook flight speed when the wielder is under water (OF 1500). |
+| `tf2cc_eternal_hook_range` | `900` | >= 1 | Hook flight range (OF MAX_ROPE_LENGTH 900). |
+| `tf2cc_eternal_hook_pull` | `720` | >= 1 | Minimum reel speed (OF HOOK_PULL 720). |
+| `tf2cc_eternal_hook_aircontrol` | `150` | >= 0 | Air control while reeled (OF MEAT_HOOK_AIRCONTROL 150). |
+| `tf2cc_eternal_hook_release_dist` | `140` | >= 0 | Released within this distance of the target (OF 140). |
+| `tf2cc_eternal_hook_cooldown` | `1.0` | >= 0 | Seconds after a release before the next hook (OF 1). |
+| `tf2cc_eternal_hook_los_time` | `0.15` | >= 0 | Released when the target is out of sight this long (OF 0.15). |
+| `tf2cc_eternal_hook_blocked` | `0.75` | 0 .. 1 | Released when the wielder's speed falls this fraction below the pull (OF 0.75; 0 = never). |
+| `tf2cc_eternal_hook_stun_mode` | `0` | 0 .. 2 | Hooked target: 0 = OF pin only (no moving or jumping, can still shoot), 1 = also a sandman-style small bonk (slowed, third person), 2 = also a full bonk (stuck, cannot attack). |
+| `tf2cc_eternal_hook_stun_time` | `3.0` | >= 0.1 | Longest stun (stun modes 1/2); it ends with the hook anyway. |
+| `tf2cc_eternal_hook_hold` | `0` | 0 .. 1 | 1 = letting go of right-click releases the hook (hold to reel); 0 = OF toggle. |
+| `tf2cc_eternal_hook_world` | `0` | 0 .. 1 | 1 = the hook also latches on the world and pulls straight in (grappling hook); 0 = OF: players only. |
+| `tf2cc_eternal_hook_beam` | `cable/cable.vmt` |  | Rope material (OF cable/cable_grey.vmt; stock HL2 cable here). |
+| `tf2cc_eternal_hook_beam_width` | `1.5` | >= 0.1 | Rope width (OF 1). |
+| `tf2cc_eternal_hook_hud` | `1` | 0 .. 1 | Show the hook's cooldown while the Eternal Shotgun is out (OF's 'Hook' meter). |
+| `tf2cc_eternal_hook_debug` | `0` | 0 .. 2 | Log hook events to the server console (2: also logs/tf2cc_hookprobe.log). |
+
+| Command | Access | What it does |
+|---|---|---|
+| `sm_tf2cc_hook_reload` | admin: config | Reload the Eternal Shotgun item definition (TF2 Classified). |
+
 ## TF2CC HUD (`tf2cc_hud.smx`)
 
 Config file: `cfg/sourcemod/tf2cc_hud.cfg`
@@ -91,6 +120,30 @@ Config file: `cfg/sourcemod/tf2cc_movement.cfg`
 | Command | Access | What it does |
 |---|---|---|
 | `sm_tf2cc_movement_reload` | admin: config | Reload movement.cfg. |
+
+## tf2cc Saw Ballista blade (`tf2cc_saw.smx`)
+
+Config file: `cfg/sourcemod/tf2cc_saw.cfg`
+
+| Cvar | Default | Range | What it does |
+|---|---|---|---|
+| `tf2cc_saw_enable` | `1` | 0 .. 1 | Saw Ballista: OF ricocheting saw blade. |
+| `tf2cc_saw_damage` | `4` | >= 0 | Damage per tick to everything the blade overlaps (crits x3). |
+| `tf2cc_saw_tick` | `0.03` | >= 0.015 | Damage tick (OF FlyThink 0.03 s). |
+| `tf2cc_saw_cap` | `200` | >= 0 | Most damage one blade deals to one target (0 = no cap). |
+| `tf2cc_saw_slow` | `0.15` | 0 .. 1 | Blade speed while inside a target, fraction of its speed (OF of_ripper_slowed_speed_perc 0.05). |
+| `tf2cc_saw_box` | `50` | >= 1 | Half width of the damage box (OF of_ripper_boxsize 50). |
+| `tf2cc_saw_box_height` | `10` | >= 1 | Half height of the damage box (OF of_ripper_boxsize_height 10). |
+| `tf2cc_saw_bounces` | `6` | >= 0 | Counted bounces before the blade sticks (OF of_ripper_bounces 6). |
+| `tf2cc_saw_count_after` | `1.0` | >= 0 | Bounces count only after this long, the first excepted (OF of_ripper_projectile_lifetime 1). |
+| `tf2cc_saw_stick_time` | `5.0` | >= 0 | A stuck blade stays this long (OF of_ripper_prop_lifetime 5). |
+| `tf2cc_saw_lifetime` | `6.0` | >= 0 | Safety: a flying blade is removed after this long (0 = never). |
+| `tf2cc_saw_scale` | `2.0` | >= 0.1 | Blade model scale (OF SetModelScale 2). |
+| `tf2cc_saw_debug` | `0` | 0 .. 1 | Log blade events to the server console. |
+
+| Command | Access | What it does |
+|---|---|---|
+| `sm_tf2cc_saw_reload` | admin: config | Reload the Saw Ballista item definition (TF2 Classified). |
 
 ## TF2CC Specials (`tf2cc_specials.smx`)
 
@@ -125,8 +178,18 @@ Config file: `cfg/sourcemod/tf2cc_specials.cfg`
 | `tf2cc_bomblets_max_live` | `96` | >= 0 | Cap on simultaneously live bomblets server-wide (edict budget). |
 | `tf2cc_dynamite_impact` | `1` | 0 .. 1 | Dynamite bundles explode on their first contact (OF ExplodeOnImpact 1). |
 | `tf2cc_quad_homing` | `1` | 0 .. 1 | Quad Launcher rockets home on the point the owner aims at while the Quad is out (OF m_bHoming / laser dot). |
-| `tf2cc_quad_turn_rate` | `6.0` | >= 0 | Quad rocket steering per second (fraction of the way to the aim direction). |
+| `tf2cc_quad_turn_rate` | `12.0` | >= 0 | Quad rocket steering per second (fraction of the way to the aim direction). 12 = the steering live servers had before the double-tracking fix (6 applied twice per tick); OF snaps fully every 0.1 s. |
+| `tf2cc_quad_toggle` | `1` | 0 .. 1 | Quad Launcher alt-fire toggles homing on/off for the owner's rockets (OF SwitchHomingModes). |
+| `tf2cc_quad_radius_step` | `25` | >= 0 | Quad Launcher: blast radius added per rocket fired since the last reload (OF ContinuousFire_BlastRadiusIncrease; 0 disables). |
+| `tf2cc_quad_radius_base` | `100` | >= 1 | Quad Launcher: the OF base radius the step is relative to (OF DamageRadius 100). |
+| `tf2cc_quad_ping` | `1` | 0 .. 1 | Quad Launcher: ping sound every second while homing is on and the Quad is out (OF Weapon_Quad.Ping). |
 | `tf2cc_chinalake_impact_time` | `0.1` | >= 0 | China Lake: grenades explode on any impact within this many seconds of firing (OF ImpactBeforeTime 0.1). |
+| `tf2cc_bouncer_elasticity` | `0.9` | 0 .. 1 | Bouncer: speed kept per bounce (OF SetElasticity 0.9). |
+| `tf2cc_bouncer_min_speed` | `200` | >= 0 | Bouncer: impacts slower than this are left to the physics (OF: no bounce below 200 u/s). |
+| `tf2cc_bouncer_gravity` | `1.5` | >= 0 | Bouncer: gravity scale (OF SetGravity 1.5; the pipe's physics gives 1.0, the rest is added per frame). |
+| `tf2cc_bouncer_speed` | `750` | >= 0 | Bouncer: launch speed (OF ProjectileSpeed 750). |
+| `tf2cc_bouncer_pitch` | `15` | -90 .. 90 | Bouncer: launch pitched up this many degrees from the aim (OF 15). |
+| `tf2cc_bouncer_fuse` | `2.0` | >= 0.1 | Bouncer: fuse from firing (OF FuseTime 2). |
 | `tf2cc_chinalake_enemy_touch` | `1` | 0 .. 1 | China Lake: grenades still explode on touching an enemy after they bounced (OF AlwaysEnableTouch 1). |
 | `tf2cc_sawblade_dps` | `200` | >= 0 | Saw Ballista grind damage per second while the target stays at the hit point. |
 | `tf2cc_sawblade_grind_time` | `0.6` | >= 0 | Saw Ballista grind duration after a hit. |
@@ -141,6 +204,11 @@ Config file: `cfg/sourcemod/tf2cc_specials.cfg`
 | `tf2cc_chainsaw_charge_meter` | `1` | 0 .. 1 | Show the chainsaw charge meter (recharge / ready / charging) while the chainsaw is out. |
 | `tf2cc_chainsaw_charge_meter_x` | `0.73` |  | Chainsaw charge meter X (0-1, -1 = centre); same spot as the umbrella boost meter. |
 | `tf2cc_chainsaw_charge_meter_y` | `0.86` |  | Chainsaw charge meter Y (0-1). |
+| `tf2cc_phlog` | `1` | 0 .. 1 | Phlogistinator Mmmph for role players: burn damage fills the rage meter and alt-fire at 100% activates it (stock Pyro values). |
+| `tf2cc_phlog_meter` | `1` | 0 .. 1 | Show the Mmmph meter to role players who carry the Phlogistinator. |
+| `tf2cc_phlog_meter_x` | `0.73` |  | Mmmph meter X (0-1, -1 = centre); same spot as the chainsaw / umbrella meters. |
+| `tf2cc_phlog_meter_y` | `0.86` |  | Mmmph meter Y (0-1). |
+| `tf2cc_phlog_debug` | `0` | 0 .. 1 | 1 = print Mmmph gain and activation to the server console. |
 
 ## TF2CC Taunts (experimental) (`tf2cc_taunts.smx`)
 
